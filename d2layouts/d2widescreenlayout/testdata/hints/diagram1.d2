@@ -1,0 +1,19 @@
+direction: right
+triggers: Triggers { shape: hexagon }
+runner: Runner {
+  direction: right
+  control: Control Loop
+  orchestrator: Orchestrator
+  stages: Stage Sessions { style.multiple: true }
+  workdir: Working Directory
+  control -> orchestrator: drives
+  control -> stages: spawns
+  orchestrator -> workdir: writes
+  stages -> workdir: writes
+}
+triggers -> runner.control
+services: Context Services
+outputs: Outputs
+runner.orchestrator -> services: fetches
+runner.stages -> services: queries
+runner -> outputs: persists
