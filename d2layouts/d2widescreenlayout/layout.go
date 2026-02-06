@@ -44,6 +44,7 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 
 	topLevel := g.Root.ChildrenArray
 	if len(topLevel) <= 1 {
+		setRootDimensions(g)
 		return nil
 	}
 
