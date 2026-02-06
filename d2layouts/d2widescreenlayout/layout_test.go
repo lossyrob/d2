@@ -114,16 +114,14 @@ func TestScoreArrangement(t *testing.T) {
 	gap := 60.0
 	target := 1.778
 
-	// Single row: width = 200+60+300+60+150+60+250 = 1080, height = 200, ratio = 5.4
+	// Single row: very wide, should score worse than two rows
 	singleRow := [][]int{{0, 1, 2, 3}}
 	score := d2widescreenlayout.ScoreArrangement(singleRow, bboxes, gap, target)
-	expectedScore := math.Abs(1080.0/200.0 - target)
-	if math.Abs(score-expectedScore) > 0.01 {
-		t.Errorf("single row score: expected %f, got %f", expectedScore, score)
+	if score <= 0 {
+		t.Errorf("single row score should be positive, got %f", score)
 	}
 
-	// Two rows [0,1] [2,3]: row1 w=560 h=150, row2 w=460 h=200
-	// total w=560, h=150+60+200=410, ratio=560/410≈1.37
+	// Two rows [0,1] [2,3]: closer to target ratio, should score better
 	twoRows := [][]int{{0, 1}, {2, 3}}
 	score2 := d2widescreenlayout.ScoreArrangement(twoRows, bboxes, gap, target)
 	if score2 >= score {
@@ -143,11 +141,17 @@ func TestRowArrangement_CustomRatio(t *testing.T) {
 	gap := 60.0
 	target := 1.0
 
-	// 2x2 arrangement: width = 100+60+100=260, height = 100+60+100=260, ratio = 1.0
+	// 2x2 arrangement: width = 260, height = 260, ratio = 1.0
+	// With the composite scoring (ratio + compactness + row penalties),
+	// this should still be among the best arrangements for a square target.
 	twoByTwo := [][]int{{0, 1}, {2, 3}}
 	score := d2widescreenlayout.ScoreArrangement(twoByTwo, bboxes, gap, target)
-	if score > 0.01 {
-		t.Errorf("2x2 square arrangement should be near-perfect for ratio 1.0, got score %f", score)
+
+	// Single row would have ratio 7.67 — much worse
+	singleRow := [][]int{{0, 1, 2, 3}}
+	scoreSingle := d2widescreenlayout.ScoreArrangement(singleRow, bboxes, gap, target)
+	if score >= scoreSingle {
+		t.Errorf("2x2 should score better than single row for square target, got 2x2=%f single=%f", score, scoreSingle)
 	}
 }
 
