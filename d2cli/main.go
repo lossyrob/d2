@@ -556,6 +556,12 @@ func compile(ctx context.Context, ms *xmain.State, plugins []d2plugin.Plugin, fs
 				_ = ms.Opts.Flags.Set("widescreen-hints", autoPath)
 			}
 		}
+		// Auto-set layout state output path if not explicitly set
+		stateVal, _ := ms.Opts.Flags.GetString("widescreen-layout-state")
+		if stateVal == "" {
+			statePath := outputPath + ".layout.json"
+			_ = ms.Opts.Flags.Set("widescreen-layout-state", statePath)
+		}
 	}
 
 	cancel := background.Repeat(func() {

@@ -15,10 +15,11 @@ import (
 )
 
 type ConfigurableOpts struct {
-	Ratio       float64 `json:"-"`
-	InnerEngine string  `json:"inner"`
-	Gap         int     `json:"gap"`
-	HintsPath   string  `json:"hints,omitempty"`
+	Ratio           float64 `json:"-"`
+	InnerEngine     string  `json:"inner"`
+	Gap             int     `json:"gap"`
+	HintsPath       string  `json:"hints,omitempty"`
+	LayoutStatePath string  `json:"layoutState,omitempty"`
 }
 
 var DefaultOpts = ConfigurableOpts{
@@ -87,6 +88,14 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 
 	// Step 8: Set root dimensions
 	setRootDimensions(g)
+
+	// Step 9: Export layout state if path is set
+	if opts.LayoutStatePath != "" {
+		state := ExportLayoutState(g, layout)
+		if err := WriteLayoutState(state, opts.LayoutStatePath); err != nil {
+			fmt.Fprintf(os.Stderr, "widescreen: warning: failed to write layout state: %v\n", err)
+		}
+	}
 
 	return nil
 }

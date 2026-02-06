@@ -55,15 +55,23 @@ func (p *widescreenPlugin) Flags(context.Context) ([]PluginSpecificFlag, error) 
 			Usage:   "path to JSON hints file for agent-directed layout overrides. If empty, auto-discovers <input>.hints.json.",
 			Tag:     "hints",
 		},
+		{
+			Name:    "widescreen-layout-state",
+			Type:    "string",
+			Default: "",
+			Usage:   "path to write layout state JSON (node positions, edge routes, quality metrics). If empty, auto-generates <output>.layout.json.",
+			Tag:     "layoutState",
+		},
 	}, nil
 }
 
 // rawOpts is used for JSON unmarshaling since the ratio flag is a string.
 type rawOpts struct {
-	Ratio string `json:"ratio"`
-	Inner string `json:"inner"`
-	Gap   *int   `json:"gap"`
-	Hints string `json:"hints"`
+	Ratio       string `json:"ratio"`
+	Inner       string `json:"inner"`
+	Gap         *int   `json:"gap"`
+	Hints       string `json:"hints"`
+	LayoutState string `json:"layoutState"`
 }
 
 func (p *widescreenPlugin) HydrateOpts(opts []byte) error {
@@ -94,6 +102,9 @@ func (p *widescreenPlugin) HydrateOpts(opts []byte) error {
 		}
 		if raw.Hints != "" {
 			cooked.HintsPath = raw.Hints
+		}
+		if raw.LayoutState != "" {
+			cooked.LayoutStatePath = raw.LayoutState
 		}
 		p.opts = &cooked
 	}
