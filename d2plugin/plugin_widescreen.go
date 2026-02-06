@@ -48,6 +48,13 @@ func (p *widescreenPlugin) Flags(context.Context) ([]PluginSpecificFlag, error) 
 			Usage:   "gap in pixels between rearranged top-level nodes.",
 			Tag:     "gap",
 		},
+		{
+			Name:    "widescreen-hints",
+			Type:    "string",
+			Default: "",
+			Usage:   "path to JSON hints file for agent-directed layout overrides. If empty, auto-discovers <input>.hints.json.",
+			Tag:     "hints",
+		},
 	}, nil
 }
 
@@ -56,6 +63,7 @@ type rawOpts struct {
 	Ratio string `json:"ratio"`
 	Inner string `json:"inner"`
 	Gap   *int   `json:"gap"`
+	Hints string `json:"hints"`
 }
 
 func (p *widescreenPlugin) HydrateOpts(opts []byte) error {
@@ -83,6 +91,9 @@ func (p *widescreenPlugin) HydrateOpts(opts []byte) error {
 		}
 		if raw.Gap != nil {
 			cooked.Gap = *raw.Gap
+		}
+		if raw.Hints != "" {
+			cooked.HintsPath = raw.Hints
 		}
 		p.opts = &cooked
 	}

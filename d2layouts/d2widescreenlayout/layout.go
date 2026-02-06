@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sort"
+	"os"
 
 	"oss.terrastruct.com/d2/d2graph"
 	"oss.terrastruct.com/d2/d2layouts/d2dagrelayout"
@@ -18,6 +18,7 @@ type ConfigurableOpts struct {
 	Ratio       float64 `json:"-"`
 	InnerEngine string  `json:"inner"`
 	Gap         int     `json:"gap"`
+	HintsPath   string  `json:"hints,omitempty"`
 }
 
 var DefaultOpts = ConfigurableOpts{
@@ -27,14 +28,30 @@ var DefaultOpts = ConfigurableOpts{
 }
 
 const (
-	laneSpacing = 20.0
-	minDetour   = 30.0
+	laneSpacing        = 20.0
+	minDetour          = 30.0
 	maxExhaustiveNodes = 20
 )
 
 func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error {
 	if opts == nil {
 		opts = &DefaultOpts
+	}
+
+	// Load hints if path is set
+	var hints *LayoutHints
+	if opts.HintsPath != "" {
+		var err error
+		hints, err = LoadHints(opts.HintsPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Apply spacing override from hints
+	gap := float64(opts.Gap)
+	if hints != nil && hints.Spacing != nil && hints.Spacing.Gap != nil {
+		gap = float64(*hints.Spacing.Gap)
 	}
 
 	// Step 1: Delegate to inner engine
@@ -48,22 +65,25 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 		return nil
 	}
 
-	gap := float64(opts.Gap)
-
 	// Step 3: Compute bounding boxes for each top-level node
 	bboxes := make([]*geo.Box, len(topLevel))
 	for i, obj := range topLevel {
 		bboxes[i] = ComputeSubtreeBBox(obj)
 	}
 
-	// Step 4: Find best row arrangement
-	bestArrangement := findBestArrangement(topLevel, bboxes, gap, opts.Ratio)
+	// Step 4: Find best row arrangement (hints can override)
+	var bestArrangement arrangement
+	if hints != nil && hints.Arrangement != nil && len(hints.Arrangement.Rows) > 0 {
+		bestArrangement = applyArrangementHints(topLevel, hints.Arrangement)
+	} else {
+		bestArrangement = findBestArrangement(topLevel, bboxes, gap, opts.Ratio)
+	}
 
 	// Step 5+6: Reposition nodes and shift internal edges
-	repositionNodes(g, topLevel, bboxes, bestArrangement, gap)
+	layout := repositionNodes(g, topLevel, bboxes, bestArrangement, gap)
 
 	// Step 7: Re-route cross-boundary edges
-	rerouteCrossBoundaryEdges(g, topLevel)
+	rerouteCrossBoundaryEdges(g, topLevel, layout, hints)
 
 	// Step 8: Set root dimensions
 	setRootDimensions(g)
@@ -116,36 +136,63 @@ type arrangement struct {
 	score float64
 }
 
+// applyArrangementHints builds an arrangement from agent-provided row assignments.
+// Unknown node IDs are warned and skipped; unlisted nodes go to the last row.
+func applyArrangementHints(topLevel []*d2graph.Object, ah *ArrangementHints) arrangement {
+	// Build name→index map
+	nameToIdx := make(map[string]int, len(topLevel))
+	for i, obj := range topLevel {
+		nameToIdx[obj.ID] = i
+	}
+
+	placed := make(map[int]bool)
+	var rows [][]int
+
+	for _, rowNames := range ah.Rows {
+		var row []int
+		for _, name := range rowNames {
+			idx, ok := nameToIdx[name]
+			if !ok {
+				fmt.Fprintf(os.Stderr, "widescreen: warning: unknown node %q in arrangement hints, skipping\n", name)
+				continue
+			}
+			if placed[idx] {
+				continue
+			}
+			row = append(row, idx)
+			placed[idx] = true
+		}
+		if len(row) > 0 {
+			rows = append(rows, row)
+		}
+	}
+
+	// Append any unlisted nodes to the last row
+	for i := range topLevel {
+		if !placed[i] {
+			if len(rows) == 0 {
+				rows = append(rows, nil)
+			}
+			rows[len(rows)-1] = append(rows[len(rows)-1], i)
+		}
+	}
+
+	return arrangement{rows: rows}
+}
+
 func findBestArrangement(topLevel []*d2graph.Object, bboxes []*geo.Box, gap, targetRatio float64) arrangement {
 	n := len(topLevel)
 
-	// Try two orderings: original and width-descending
 	originalOrder := make([]int, n)
 	for i := range originalOrder {
 		originalOrder[i] = i
 	}
 
-	widthSorted := make([]int, n)
-	copy(widthSorted, originalOrder)
-	sort.Slice(widthSorted, func(i, j int) bool {
-		return bboxes[widthSorted[i]].Width > bboxes[widthSorted[j]].Width
-	})
-
-	orderings := [][]int{originalOrder, widthSorted}
-
-	best := arrangement{score: math.Inf(1)}
-	for _, order := range orderings {
-		var candidate arrangement
-		if n <= maxExhaustiveNodes {
-			candidate = exhaustiveSearch(order, bboxes, gap, targetRatio)
-		} else {
-			candidate = heuristicSearch(order, bboxes, gap, targetRatio)
-		}
-		if candidate.score < best.score {
-			best = candidate
-		}
+	// Only use original ordering — preserves dagre's logical node placement
+	if n <= maxExhaustiveNodes {
+		return exhaustiveSearch(originalOrder, bboxes, gap, targetRatio)
 	}
-	return best
+	return heuristicSearch(originalOrder, bboxes, gap, targetRatio)
 }
 
 // exhaustiveSearch tries all 2^(n-1) cut combinations for small n.
@@ -251,6 +298,8 @@ func greedyFill(order []int, bboxes []*geo.Box, gap, targetRowWidth float64, max
 func ScoreArrangement(rows [][]int, bboxes []*geo.Box, gap, targetRatio float64) float64 {
 	totalWidth := 0.0
 	totalHeight := 0.0
+	totalArea := 0.0
+
 	for i, row := range rows {
 		rowWidth := 0.0
 		rowHeight := 0.0
@@ -263,6 +312,7 @@ func ScoreArrangement(rows [][]int, bboxes []*geo.Box, gap, targetRatio float64)
 				rowHeight = bboxes[idx].Height
 			}
 		}
+		totalArea += rowWidth * rowHeight
 		if rowWidth > totalWidth {
 			totalWidth = rowWidth
 		}
@@ -274,24 +324,76 @@ func ScoreArrangement(rows [][]int, bboxes []*geo.Box, gap, targetRatio float64)
 	if totalHeight == 0 {
 		return math.Inf(1)
 	}
+
 	actualRatio := totalWidth / totalHeight
-	return math.Abs(actualRatio - targetRatio)
+	ratioError := math.Abs(actualRatio - targetRatio)
+
+	// Soft ratio error: once within ~40% of target, diminishing penalty
+	// This allows compactness to dominate when ratio is "close enough"
+	softRatio := math.Log1p(ratioError)
+
+	// Compactness: penalize wasted space (bounding rect area vs actual content area)
+	boundingArea := totalWidth * totalHeight
+	wasteRatio := 1.0 - totalArea/boundingArea
+
+	// Penalize having many rows with single small items
+	rowCountPenalty := 0.0
+	if len(rows) > 1 {
+		for _, row := range rows {
+			if len(row) == 1 {
+				// Single-item row: penalize if the item is much smaller than the widest row
+				rowWidth := bboxes[row[0]].Width
+				if totalWidth > 0 && rowWidth < totalWidth*0.3 {
+					rowCountPenalty += 0.5
+				}
+			}
+		}
+	}
+
+	return softRatio + wasteRatio*1.5 + rowCountPenalty
 }
 
-func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, arr arrangement, gap float64) {
+// gridLayout stores the computed row/column structure after repositioning.
+type gridLayout struct {
+	rows       [][]int           // node indices per row
+	rowTops    []float64         // Y coordinate of top of each row
+	rowBottoms []float64         // Y coordinate of bottom of each row
+	gap        float64           // gap between rows/columns
+	nodeRow    map[*d2graph.Object]int // which row each top-level node is in
+	nodeCol    map[*d2graph.Object]int // which column (position in row) each node is in
+	bboxes     map[*d2graph.Object]*geo.Box // post-reposition bboxes
+}
+
+func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, arr arrangement, gap float64) *gridLayout {
 	// Pre-compute deltas for each top-level node
 	cursorY := 0.0
 	deltas := make(map[*d2graph.Object][2]float64)
+	rowWidths := make([]float64, len(arr.rows))
+	rowHeights := make([]float64, len(arr.rows))
+	maxRowWidth := 0.0
 
-	for _, row := range arr.rows {
+	for rowIdx, row := range arr.rows {
 		rowHeight := 0.0
+		rowWidth := 0.0
 		for _, idx := range row {
 			if bboxes[idx].Height > rowHeight {
 				rowHeight = bboxes[idx].Height
 			}
+			rowWidth += bboxes[idx].Width
 		}
+		if len(row) > 1 {
+			rowWidth += gap * float64(len(row)-1)
+		}
+		rowWidths[rowIdx] = rowWidth
+		rowHeights[rowIdx] = rowHeight
+		if rowWidth > maxRowWidth {
+			maxRowWidth = rowWidth
+		}
+	}
 
-		cursorX := 0.0
+	for rowIdx, row := range arr.rows {
+		rowHeight := rowHeights[rowIdx]
+		cursorX := (maxRowWidth - rowWidths[rowIdx]) / 2
 		for _, idx := range row {
 			obj := topLevel[idx]
 			bbox := bboxes[idx]
@@ -325,9 +427,34 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 			}
 		}
 	}
+
+	// Build grid layout info
+	gl := &gridLayout{
+		rows:    arr.rows,
+		gap:     gap,
+		nodeRow: make(map[*d2graph.Object]int),
+		nodeCol: make(map[*d2graph.Object]int),
+		bboxes:  make(map[*d2graph.Object]*geo.Box),
+	}
+
+	curY := 0.0
+	for rowIdx, row := range arr.rows {
+		rh := rowHeights[rowIdx]
+		gl.rowTops = append(gl.rowTops, curY)
+		gl.rowBottoms = append(gl.rowBottoms, curY+rh)
+		for colIdx, idx := range row {
+			obj := topLevel[idx]
+			gl.nodeRow[obj] = rowIdx
+			gl.nodeCol[obj] = colIdx
+			gl.bboxes[obj] = ComputeSubtreeBBox(obj)
+		}
+		curY += rh + gap
+	}
+
+	return gl
 }
 
-func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object) {
+func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl *gridLayout, hints *LayoutHints) {
 	// Build lookup: object -> top-level ancestor
 	ancestorMap := make(map[*d2graph.Object]*d2graph.Object)
 	for _, tl := range topLevel {
@@ -337,9 +464,12 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object) {
 		})
 	}
 
-	// Group cross-boundary edges by (srcTopLevel, dstTopLevel) pair
-	type edgePairKey struct{ src, dst *d2graph.Object }
-	edgeGroups := make(map[edgePairKey][]*d2graph.Edge)
+	// Collect cross-boundary edges
+	type crossEdge struct {
+		edge         *d2graph.Edge
+		srcTL, dstTL *d2graph.Object
+	}
+	var crossEdges []crossEdge
 
 	for _, e := range g.Edges {
 		srcTL := ancestorMap[e.Src]
@@ -347,78 +477,413 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object) {
 		if srcTL == nil || dstTL == nil || srcTL == dstTL {
 			continue
 		}
-		key := edgePairKey{srcTL, dstTL}
-		edgeGroups[key] = append(edgeGroups[key], e)
+		crossEdges = append(crossEdges, crossEdge{e, srcTL, dstTL})
 	}
 
-	// Route each group
-	for _, edges := range edgeGroups {
-		for laneIdx, e := range edges {
-			laneOffset := float64(laneIdx) * laneSpacing
-			routeOrthogonal(e, laneOffset)
+	if len(crossEdges) == 0 {
+		return
+	}
+
+	// Compute horizontal channel Y-coordinates (midpoints between rows)
+	// hChannel[i] = Y midpoint of gap between row i and row i+1
+	hChannels := make([]float64, len(gl.rows)-1)
+	for i := 0; i < len(gl.rows)-1; i++ {
+		hChannels[i] = (gl.rowBottoms[i] + gl.rowTops[i+1]) / 2
+	}
+
+	// Build edge hint lookup: match edges to their hints
+	edgeHints := make(map[*d2graph.Edge]*EdgeHint)
+	if hints != nil && len(hints.Edges) > 0 {
+		// Track duplicate edge counts for index matching
+		type edgePairKey struct{ src, dst string }
+		edgePairCounts := make(map[edgePairKey]int)
+		for _, ce := range crossEdges {
+			srcAbs := ce.edge.Src.AbsID()
+			dstAbs := ce.edge.Dst.AbsID()
+			pk := edgePairKey{srcAbs, dstAbs}
+			idx := edgePairCounts[pk]
+			edgePairCounts[pk]++
+
+			// Try matching with index first, then without
+			keyWithIdx := fmt.Sprintf("%s -> %s[%d]", srcAbs, dstAbs, idx)
+			keyWithout := fmt.Sprintf("%s -> %s", srcAbs, dstAbs)
+			if h, ok := hints.Edges[keyWithIdx]; ok {
+				edgeHints[ce.edge] = h
+			} else if h, ok := hints.Edges[keyWithout]; ok && idx == 0 {
+				edgeHints[ce.edge] = h
+			}
+		}
+		// Warn about unmatched hint keys
+		matched := make(map[string]bool)
+		for _, h := range edgeHints {
+			for k, v := range hints.Edges {
+				if v == h {
+					matched[k] = true
+				}
+			}
+		}
+		for k := range hints.Edges {
+			if !matched[k] {
+				fmt.Fprintf(os.Stderr, "widescreen: warning: unmatched edge hint key %q\n", k)
+			}
 		}
 	}
-}
 
-func routeOrthogonal(e *d2graph.Edge, laneOffset float64) {
-	srcCenter := e.Src.Center()
-	dstCenter := e.Dst.Center()
+	// Group edges by channel they'll use, to assign lane offsets
+	type channelKey struct {
+		channelIdx int
+		direction  int // 0=horizontal channel, 1=vertical detour left, 2=vertical detour right
+	}
+	channelUsers := make(map[channelKey]int) // count of edges per channel
 
-	dx := dstCenter.X - srcCenter.X
-	dy := dstCenter.Y - srcCenter.Y
+	// First pass: determine routing for each edge and count channel usage
+	type edgeRouting struct {
+		sameRow     bool
+		srcRow      int
+		dstRow      int
+		channelIdx  int // which hChannel to use (-1 if same row)
+		needsDetour bool
+	}
+	routings := make([]edgeRouting, len(crossEdges))
 
-	var route []*geo.Point
+	for i, ce := range crossEdges {
+		srcRow := gl.nodeRow[ce.srcTL]
+		dstRow := gl.nodeRow[ce.dstTL]
+		r := edgeRouting{srcRow: srcRow, dstRow: dstRow}
 
-	if math.Abs(dx) > math.Abs(dy) {
-		// Primarily horizontal: Z-shape H→V→H
-		midX := (srcCenter.X + dstCenter.X) / 2 + laneOffset
-		if math.Abs(dy) < 1 {
-			// Degenerate: same row. Force vertical detour.
-			detourY := srcCenter.Y - (minDetour + laneOffset)
-			route = []*geo.Point{
-				geo.NewPoint(srcCenter.X, srcCenter.Y),
-				geo.NewPoint(srcCenter.X, detourY),
-				geo.NewPoint(dstCenter.X, detourY),
-				geo.NewPoint(dstCenter.X, dstCenter.Y),
-			}
+		if srcRow == dstRow {
+			r.sameRow = true
+			r.channelIdx = -1
 		} else {
-			route = []*geo.Point{
-				geo.NewPoint(srcCenter.X, srcCenter.Y),
-				geo.NewPoint(midX, srcCenter.Y),
-				geo.NewPoint(midX, dstCenter.Y),
-				geo.NewPoint(dstCenter.X, dstCenter.Y),
+			// Use the channel between the two rows
+			minRow := srcRow
+			maxRow := dstRow
+			if srcRow > dstRow {
+				minRow, maxRow = dstRow, srcRow
 			}
-		}
-	} else {
-		// Primarily vertical: Z-shape V→H→V
-		midY := (srcCenter.Y + dstCenter.Y) / 2 + laneOffset
-		if math.Abs(dx) < 1 {
-			// Degenerate: same column. Force horizontal detour.
-			detourX := srcCenter.X - (minDetour + laneOffset)
-			route = []*geo.Point{
-				geo.NewPoint(srcCenter.X, srcCenter.Y),
-				geo.NewPoint(detourX, srcCenter.Y),
-				geo.NewPoint(detourX, dstCenter.Y),
-				geo.NewPoint(dstCenter.X, dstCenter.Y),
+			// For multi-row spanning, use the channel closest to the source row
+			r.channelIdx = minRow
+			if minRow >= len(hChannels) {
+				r.channelIdx = len(hChannels) - 1
 			}
-		} else {
-			route = []*geo.Point{
+
+			// Check if the Z-route would cross an obstacle
+			srcCenter := ce.edge.Src.Center()
+			dstCenter := ce.edge.Dst.Center()
+			midY := hChannels[r.channelIdx]
+			testRoute := []*geo.Point{
 				geo.NewPoint(srcCenter.X, srcCenter.Y),
 				geo.NewPoint(srcCenter.X, midY),
 				geo.NewPoint(dstCenter.X, midY),
 				geo.NewPoint(dstCenter.X, dstCenter.Y),
 			}
+
+			// Check if horizontal segment crosses any intermediate bboxes
+			for _, tl := range topLevel {
+				if tl == ce.srcTL || tl == ce.dstTL {
+					continue
+				}
+				bbox := gl.bboxes[tl]
+				if routeSegmentCrossesBBox(testRoute, bbox) {
+					r.needsDetour = true
+					break
+				}
+			}
+
+			// Multi-row spanning: check intermediate rows too
+			if maxRow-minRow > 1 {
+				for midRowIdx := minRow + 1; midRowIdx < maxRow; midRowIdx++ {
+					for _, nodeIdx := range gl.rows[midRowIdx] {
+						bbox := gl.bboxes[topLevel[nodeIdx]]
+						if routeSegmentCrossesBBox(testRoute, bbox) {
+							r.needsDetour = true
+							break
+						}
+					}
+				}
+			}
+		}
+
+		routings[i] = r
+		if !r.sameRow {
+			key := channelKey{r.channelIdx, 0}
+			channelUsers[key]++
 		}
 	}
 
-	e.Route = route
-	e.IsCurve = false
-	start, end := e.TraceToShape(e.Route, 0, len(e.Route)-1)
-	e.Route = e.Route[start : end+1]
+	// Second pass: assign lane offsets and build routes
+	// Sort cross-row edges within each channel by source X to spread them cleanly
+	channelLaneIdx := make(map[channelKey]int)
 
-	if e.Label.Value != "" {
-		e.LabelPosition = go2.Pointer(label.InsideMiddleCenter.String())
+	for i, ce := range crossEdges {
+		r := routings[i]
+		e := ce.edge
+		srcCenter := e.Src.Center()
+		dstCenter := e.Dst.Center()
+		eh := edgeHints[e]
+
+		var route []*geo.Point
+
+		if eh != nil && len(eh.Waypoints) > 0 {
+			// Waypoint hints override all routing — use exact coordinates.
+			// Prepend src center and append dst center so TraceToShape can clip properly.
+			route = make([]*geo.Point, 0, len(eh.Waypoints)+2)
+			route = append(route, geo.NewPoint(srcCenter.X, srcCenter.Y))
+			for _, wp := range eh.Waypoints {
+				route = append(route, geo.NewPoint(wp.X, wp.Y))
+			}
+			route = append(route, geo.NewPoint(dstCenter.X, dstCenter.Y))
+		} else if r.sameRow {
+			// Same-row edges: route through horizontal gap between bboxes
+			srcBBox := gl.bboxes[ce.srcTL]
+			dstBBox := gl.bboxes[ce.dstTL]
+			srcMaxX := srcBBox.TopLeft.X + srcBBox.Width
+			dstMinX := dstBBox.TopLeft.X
+			if dstBBox.TopLeft.X+dstBBox.Width < srcBBox.TopLeft.X {
+				srcMaxX = dstBBox.TopLeft.X + dstBBox.Width
+				dstMinX = srcBBox.TopLeft.X
+			}
+			midX := (srcMaxX + dstMinX) / 2
+
+			dy := dstCenter.Y - srcCenter.Y
+			if math.Abs(dy) < 1 {
+				route = []*geo.Point{
+					geo.NewPoint(srcCenter.X, srcCenter.Y),
+					geo.NewPoint(dstCenter.X, dstCenter.Y),
+				}
+			} else {
+				route = []*geo.Point{
+					geo.NewPoint(srcCenter.X, srcCenter.Y),
+					geo.NewPoint(midX, srcCenter.Y),
+					geo.NewPoint(midX, dstCenter.Y),
+					geo.NewPoint(dstCenter.X, dstCenter.Y),
+				}
+			}
+		} else if r.needsDetour || (eh != nil && eh.Side != "") {
+			// Route around obstacles (or forced by side hint): go to the side
+			var forceSide int
+			if eh != nil && eh.Side != "" {
+				switch eh.Side {
+				case "left":
+					forceSide = -1
+				case "right":
+					forceSide = 1
+				default:
+					fmt.Fprintf(os.Stderr, "widescreen: warning: invalid side %q for edge hint, expected \"left\" or \"right\"\n", eh.Side)
+				}
+			}
+			route = routeAroundObstacles(srcCenter, dstCenter, 0, forceSide, collectObstacleBBoxes(topLevel, gl, ce.srcTL, ce.dstTL))
+		} else {
+			// Normal cross-row route through horizontal channel
+			key := channelKey{r.channelIdx, 0}
+			totalInChannel := channelUsers[key]
+			laneIdx := channelLaneIdx[key]
+			channelLaneIdx[key]++
+
+			var laneOffset float64
+			if eh := edgeHints[e]; eh != nil && eh.LaneIndex != nil {
+				laneOffset = float64(*eh.LaneIndex) * laneSpacing
+			} else {
+				laneOffset = (float64(laneIdx) - float64(totalInChannel-1)/2) * laneSpacing
+			}
+
+			midY := hChannels[r.channelIdx] + laneOffset
+			// Clamp to stay within the gap
+			gapTop := gl.rowBottoms[r.channelIdx]
+			gapBottom := gl.rowTops[r.channelIdx+1]
+			if gapBottom-gapTop > 2 {
+				midY = clamp(midY, gapTop+1, gapBottom-1)
+			}
+
+			// Spread vertical segments: offset departure/arrival X to avoid overlap
+			// Use laneOffset applied horizontally to the vertical segments
+			departX := srcCenter.X + laneOffset
+			arriveX := dstCenter.X + laneOffset
+
+			route = []*geo.Point{
+				geo.NewPoint(srcCenter.X, srcCenter.Y),
+				geo.NewPoint(departX, srcCenter.Y),
+				geo.NewPoint(departX, midY),
+				geo.NewPoint(arriveX, midY),
+				geo.NewPoint(arriveX, dstCenter.Y),
+				geo.NewPoint(dstCenter.X, dstCenter.Y),
+			}
+
+			// Simplify: remove zero-length segments
+			route = simplifyRoute(route)
+		}
+
+		e.Route = route
+		e.IsCurve = false
+		if len(e.Route) >= 2 {
+			start, end := e.TraceToShape(e.Route, 0, len(e.Route)-1)
+			if start <= end && end < len(e.Route) {
+				e.Route = e.Route[start : end+1]
+			}
+		}
+
+		if e.Label.Value != "" {
+			labelPos := label.InsideMiddleCenter.String()
+			if eh := edgeHints[e]; eh != nil && eh.LabelPosition != "" {
+				labelPos = eh.LabelPosition
+			}
+			e.LabelPosition = go2.Pointer(labelPos)
+		}
 	}
+}
+
+// simplifyRoute removes redundant points (zero-length segments and collinear points).
+func simplifyRoute(route []*geo.Point) []*geo.Point {
+	if len(route) <= 2 {
+		return route
+	}
+	result := []*geo.Point{route[0]}
+	for i := 1; i < len(route); i++ {
+		prev := result[len(result)-1]
+		curr := route[i]
+		// Skip zero-length segments
+		if math.Abs(prev.X-curr.X) < 0.5 && math.Abs(prev.Y-curr.Y) < 0.5 {
+			continue
+		}
+		// Merge collinear segments
+		if len(result) >= 2 {
+			pprev := result[len(result)-2]
+			sameX := math.Abs(pprev.X-prev.X) < 0.5 && math.Abs(prev.X-curr.X) < 0.5
+			sameY := math.Abs(pprev.Y-prev.Y) < 0.5 && math.Abs(prev.Y-curr.Y) < 0.5
+			if sameX || sameY {
+				result[len(result)-1] = curr
+				continue
+			}
+		}
+		result = append(result, curr)
+	}
+	return result
+}
+
+// collectObstacleBBoxes returns bboxes of all top-level nodes except src and dst.
+func collectObstacleBBoxes(topLevel []*d2graph.Object, gl *gridLayout, srcTL, dstTL *d2graph.Object) []*geo.Box {
+	var obstacles []*geo.Box
+	for _, tl := range topLevel {
+		if tl != srcTL && tl != dstTL {
+			obstacles = append(obstacles, gl.bboxes[tl])
+		}
+	}
+	return obstacles
+}
+
+// routeSegmentCrossesBBox checks if any segment of a route passes through a bbox.
+func routeSegmentCrossesBBox(route []*geo.Point, bbox *geo.Box) bool {
+	obsMinX, obsMinY, obsMaxX, obsMaxY := bboxBounds(bbox)
+	for i := 0; i < len(route)-1; i++ {
+		p1, p2 := route[i], route[i+1]
+		// Horizontal segment
+		if math.Abs(p1.Y-p2.Y) < 1 {
+			y := p1.Y
+			if y > obsMinY && y < obsMaxY {
+				segMinX := math.Min(p1.X, p2.X)
+				segMaxX := math.Max(p1.X, p2.X)
+				if segMaxX > obsMinX && segMinX < obsMaxX {
+					return true
+				}
+			}
+		}
+		// Vertical segment
+		if math.Abs(p1.X-p2.X) < 1 {
+			x := p1.X
+			if x > obsMinX && x < obsMaxX {
+				segMinY := math.Min(p1.Y, p2.Y)
+				segMaxY := math.Max(p1.Y, p2.Y)
+				if segMaxY > obsMinY && segMinY < obsMaxY {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// routeAroundObstacles computes a side-route that avoids all obstacles between src and dst.
+func routeAroundObstacles(srcCenter, dstCenter *geo.Point, laneOffset float64, forceSide int, obstacles []*geo.Box) []*geo.Point {
+	minSrcY := math.Min(srcCenter.Y, dstCenter.Y)
+	maxDstY := math.Max(srcCenter.Y, dstCenter.Y)
+
+	// Find combined extents of obstacles in the vertical corridor
+	obsMinX, obsMaxX := math.Inf(1), math.Inf(-1)
+	for _, obs := range obstacles {
+		oMinX, oMinY, oMaxX, oMaxY := bboxBounds(obs)
+		if oMaxY <= minSrcY || oMinY >= maxDstY {
+			continue
+		}
+		obsMinX = math.Min(obsMinX, oMinX)
+		obsMaxX = math.Max(obsMaxX, oMaxX)
+	}
+
+	if math.IsInf(obsMinX, 1) {
+		if forceSide == 0 {
+			// No obstacles, no forced side — direct route
+			return []*geo.Point{
+				geo.NewPoint(srcCenter.X, srcCenter.Y),
+				geo.NewPoint(dstCenter.X, dstCenter.Y),
+			}
+		}
+		// No obstacles but forced side — use src/dst extent as reference
+		minX := math.Min(srcCenter.X, dstCenter.X)
+		maxX := math.Max(srcCenter.X, dstCenter.X)
+		var sideX float64
+		if forceSide < 0 {
+			sideX = minX - minDetour + laneOffset
+		} else {
+			sideX = maxX + minDetour + laneOffset
+		}
+		return []*geo.Point{
+			geo.NewPoint(srcCenter.X, srcCenter.Y),
+			geo.NewPoint(sideX, srcCenter.Y),
+			geo.NewPoint(sideX, dstCenter.Y),
+			geo.NewPoint(dstCenter.X, dstCenter.Y),
+		}
+	}
+
+	// Choose left or right side — minimize total horizontal travel
+	leftX := obsMinX - minDetour
+	rightX := obsMaxX + minDetour
+	var sideX float64
+	if forceSide < 0 {
+		sideX = leftX + laneOffset
+	} else if forceSide > 0 {
+		sideX = rightX + laneOffset
+	} else {
+		leftTravel := math.Abs(srcCenter.X-leftX) + math.Abs(leftX-dstCenter.X)
+		rightTravel := math.Abs(srcCenter.X-rightX) + math.Abs(rightX-dstCenter.X)
+		sideX = leftX + laneOffset
+		if rightTravel < leftTravel {
+			sideX = rightX + laneOffset
+		}
+	}
+
+	return []*geo.Point{
+		geo.NewPoint(srcCenter.X, srcCenter.Y),
+		geo.NewPoint(sideX, srcCenter.Y),
+		geo.NewPoint(sideX, dstCenter.Y),
+		geo.NewPoint(dstCenter.X, dstCenter.Y),
+	}
+}
+
+func bboxBounds(b *geo.Box) (minX, minY, maxX, maxY float64) {
+	minX = b.TopLeft.X
+	minY = b.TopLeft.Y
+	maxX = minX + b.Width
+	maxY = minY + b.Height
+	return minX, minY, maxX, maxY
+}
+
+func clamp(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // findTopLevelAncestor walks the Parent chain to find the direct child of root.
@@ -434,7 +899,12 @@ func FindTopLevelAncestor(obj *d2graph.Object, root *d2graph.Object) *d2graph.Ob
 
 // RouteOrthogonalExported is an exported wrapper for testing.
 func RouteOrthogonalExported(e *d2graph.Edge, laneOffset float64) {
-	routeOrthogonal(e, laneOffset)
+	srcCenter := e.Src.Center()
+	dstCenter := e.Dst.Center()
+	e.Route = BuildOrthogonalRoute(srcCenter, dstCenter, laneOffset)
+	e.IsCurve = false
+	start, end := e.TraceToShape(e.Route, 0, len(e.Route)-1)
+	e.Route = e.Route[start : end+1]
 }
 
 // BuildOrthogonalRoute builds an orthogonal route between two center points, without
