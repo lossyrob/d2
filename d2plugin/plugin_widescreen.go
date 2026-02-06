@@ -55,7 +55,7 @@ func (p *widescreenPlugin) Flags(context.Context) ([]PluginSpecificFlag, error) 
 type rawOpts struct {
 	Ratio string `json:"ratio"`
 	Inner string `json:"inner"`
-	Gap   int    `json:"gap"`
+	Gap   *int   `json:"gap"`
 }
 
 func (p *widescreenPlugin) HydrateOpts(opts []byte) error {
@@ -81,8 +81,8 @@ func (p *widescreenPlugin) HydrateOpts(opts []byte) error {
 		if raw.Inner != "" {
 			cooked.InnerEngine = raw.Inner
 		}
-		if raw.Gap != 0 {
-			cooked.Gap = raw.Gap
+		if raw.Gap != nil {
+			cooked.Gap = *raw.Gap
 		}
 		p.opts = &cooked
 	}

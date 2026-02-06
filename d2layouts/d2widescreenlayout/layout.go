@@ -413,7 +413,8 @@ func routeOrthogonal(e *d2graph.Edge, laneOffset float64) {
 
 	e.Route = route
 	e.IsCurve = false
-	e.TraceToShape(e.Route, 0, len(e.Route)-1)
+	start, end := e.TraceToShape(e.Route, 0, len(e.Route)-1)
+	e.Route = e.Route[start : end+1]
 
 	if e.Label.Value != "" {
 		e.LabelPosition = go2.Pointer(label.InsideMiddleCenter.String())
@@ -506,6 +507,7 @@ func setRootDimensions(g *d2graph.Graph) {
 	if math.IsInf(minX, 1) {
 		return
 	}
+	g.Root.TopLeft = geo.NewPoint(minX, minY)
 	g.Root.Width = maxX - minX
 	g.Root.Height = maxY - minY
 }

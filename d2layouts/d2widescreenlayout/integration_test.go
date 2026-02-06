@@ -80,9 +80,9 @@ runner -> outputs: persists
 		t.Fatal("root dimensions should be non-zero")
 	}
 	ratio := g.Root.Width / g.Root.Height
-	// SC-001: within 20% of 1.778 → ratio between 1.4 and 2.1
-	if ratio < 1.0 || ratio > 3.0 {
-		t.Errorf("expected ratio closer to 1.778, got %f (width=%f, height=%f)", ratio, g.Root.Width, g.Root.Height)
+	// SC-001: within 20% of 1.778 → ratio between ~1.4 and ~2.1
+	if ratio < 1.4 || ratio > 2.2 {
+		t.Errorf("expected ratio within 20%% of 1.778, got %f (width=%f, height=%f)", ratio, g.Root.Width, g.Root.Height)
 	}
 }
 
@@ -121,8 +121,8 @@ d
 		t.Fatal("root dimensions should be non-zero")
 	}
 	ratio := g.Root.Width / g.Root.Height
-	// For 4 simple nodes targeting 1.0, should be closer to square than wide
-	if ratio > 2.0 {
+	// SC-003: within 20% of 1.0 → ratio between 0.8 and 1.2
+	if ratio < 0.8 || ratio > 1.2 {
 		t.Errorf("targeting ratio 1.0 but got %f", ratio)
 	}
 }
