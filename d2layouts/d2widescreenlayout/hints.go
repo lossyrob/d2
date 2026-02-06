@@ -14,6 +14,7 @@ import (
 type LayoutHints struct {
 	Arrangement *ArrangementHints      `json:"arrangement,omitempty"`
 	Edges       map[string]*EdgeHint   `json:"edges,omitempty"`
+	Nodes       map[string]*NodeHint   `json:"nodes,omitempty"`
 	Spacing     *SpacingHints          `json:"spacing,omitempty"`
 }
 
@@ -33,10 +34,24 @@ type EdgeHint struct {
 	LaneIndex *int `json:"laneIndex,omitempty"`
 	// LabelPosition overrides the edge label position string.
 	LabelPosition string `json:"labelPosition,omitempty"`
+	// LabelPercentage overrides where along the route the label is placed (0.0=start, 1.0=end).
+	LabelPercentage *float64 `json:"labelPercentage,omitempty"`
+	// LabelOffset shifts the label from the route by the given x/y pixel amounts.
+	LabelOffset *WaypointHint `json:"labelOffset,omitempty"`
 	// Waypoints specifies exact route bend points as absolute coordinates.
 	// When set, all other routing hints (side, laneIndex) are ignored.
 	// TraceToShape clips endpoints to shape borders automatically.
 	Waypoints []WaypointHint `json:"waypoints,omitempty"`
+}
+
+// NodeHint provides per-node position and size overrides.
+type NodeHint struct {
+	// X overrides the node's left X coordinate (absolute pixels).
+	X *float64 `json:"x,omitempty"`
+	// Y overrides the node's top Y coordinate (absolute pixels).
+	Y *float64 `json:"y,omitempty"`
+	// MinWidth sets a minimum width for the node container.
+	MinWidth *float64 `json:"minWidth,omitempty"`
 }
 
 // WaypointHint is an absolute coordinate point for edge routing.

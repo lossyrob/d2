@@ -81,7 +81,7 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 	}
 
 	// Step 5+6: Reposition nodes and shift internal edges
-	layout := repositionNodes(g, topLevel, bboxes, bestArrangement, gap)
+	layout := repositionNodes(g, topLevel, bboxes, bestArrangement, gap, hints)
 
 	// Step 7: Re-route cross-boundary edges
 	rerouteCrossBoundaryEdges(g, topLevel, layout, hints)
@@ -373,7 +373,7 @@ type gridLayout struct {
 	bboxes     map[*d2graph.Object]*geo.Box // post-reposition bboxes
 }
 
-func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, arr arrangement, gap float64) *gridLayout {
+func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, arr arrangement, gap float64, hints *LayoutHints) *gridLayout {
 	// Pre-compute deltas for each top-level node
 	cursorY := 0.0
 	deltas := make(map[*d2graph.Object][2]float64)
@@ -414,6 +414,38 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 			cursorX += bbox.Width + gap
 		}
 		cursorY += rowHeight + gap
+	}
+
+	// Apply node position hints: override computed positions with agent-specified x/y
+	if hints != nil && len(hints.Nodes) > 0 {
+		idToObj := make(map[string]*d2graph.Object, len(topLevel))
+		idToIdx := make(map[string]int, len(topLevel))
+		for i, obj := range topLevel {
+			idToObj[obj.ID] = obj
+			idToIdx[obj.ID] = i
+		}
+		for nodeID, nh := range hints.Nodes {
+			obj, ok := idToObj[nodeID]
+			if !ok {
+				fmt.Fprintf(os.Stderr, "widescreen: warning: node hint for unknown node %q\n", nodeID)
+				continue
+			}
+			idx := idToIdx[nodeID]
+			bbox := bboxes[idx]
+			d := deltas[obj]
+			if nh.X != nil {
+				d[0] = *nh.X - bbox.TopLeft.X
+			}
+			if nh.Y != nil {
+				d[1] = *nh.Y - bbox.TopLeft.Y
+			}
+			deltas[obj] = d
+
+			// Apply MinWidth: expand node container if needed
+			if nh.MinWidth != nil && obj.Width < *nh.MinWidth {
+				obj.Width = *nh.MinWidth
+			}
+		}
 	}
 
 	// Apply deltas: move objects and their internal edges
@@ -737,8 +769,61 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 				labelPos = eh.LabelPosition
 			}
 			e.LabelPosition = go2.Pointer(labelPos)
+
+			// Apply label percentage: position label along the route at a given fraction
+			eh := edgeHints[e]
+			if eh != nil && eh.LabelPercentage != nil && len(e.Route) >= 2 {
+				pct := *eh.LabelPercentage
+				if pct < 0 {
+					pct = 0
+				} else if pct > 1 {
+					pct = 1
+				}
+				lp := pointAlongRoute(e.Route, pct)
+				if eh.LabelOffset != nil {
+					lp.X += eh.LabelOffset.X
+					lp.Y += eh.LabelOffset.Y
+				}
+				e.LabelPosition = go2.Pointer(labelPos)
+			}
 		}
 	}
+}
+
+// pointAlongRoute returns the point at a given fraction (0.0 to 1.0) along the route's total length.
+func pointAlongRoute(route []*geo.Point, fraction float64) *geo.Point {
+	if len(route) == 0 {
+		return geo.NewPoint(0, 0)
+	}
+	if len(route) == 1 || fraction <= 0 {
+		return geo.NewPoint(route[0].X, route[0].Y)
+	}
+
+	// Compute total route length
+	totalLen := 0.0
+	for i := 1; i < len(route); i++ {
+		dx := route[i].X - route[i-1].X
+		dy := route[i].Y - route[i-1].Y
+		totalLen += math.Sqrt(dx*dx + dy*dy)
+	}
+
+	targetLen := fraction * totalLen
+	accumulated := 0.0
+	for i := 1; i < len(route); i++ {
+		dx := route[i].X - route[i-1].X
+		dy := route[i].Y - route[i-1].Y
+		segLen := math.Sqrt(dx*dx + dy*dy)
+		if accumulated+segLen >= targetLen {
+			t := (targetLen - accumulated) / segLen
+			return geo.NewPoint(
+				route[i-1].X+t*dx,
+				route[i-1].Y+t*dy,
+			)
+		}
+		accumulated += segLen
+	}
+	last := route[len(route)-1]
+	return geo.NewPoint(last.X, last.Y)
 }
 
 // simplifyRoute removes redundant points (zero-length segments and collinear points).
