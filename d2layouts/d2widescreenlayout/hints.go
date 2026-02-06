@@ -19,10 +19,35 @@ type LayoutHints struct {
 }
 
 // ArrangementHints overrides the automatic row arrangement algorithm.
+// Accepts two JSON formats:
+//   - Flat array: ["A", "B", "C"] — treated as a single-row ordering
+//   - Struct with rows: {"rows": [["A", "B"], ["C", "D"]]}
 type ArrangementHints struct {
 	// Rows specifies which top-level node IDs go in each row.
 	// Nodes not listed are appended to the last row.
 	Rows [][]string `json:"rows"`
+}
+
+// UnmarshalJSON allows ArrangementHints to accept either a flat string array
+// (single-row shorthand) or the full {"rows": [...]} struct format.
+func (ah *ArrangementHints) UnmarshalJSON(data []byte) error {
+	// Try flat array first: ["A", "B", "C"]
+	var flat []string
+	if err := json.Unmarshal(data, &flat); err == nil {
+		ah.Rows = [][]string{flat}
+		return nil
+	}
+
+	// Try struct format: {"rows": [["A", "B"], ["C", "D"]]}
+	type rawArrangement struct {
+		Rows [][]string `json:"rows"`
+	}
+	var raw rawArrangement
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("arrangement must be either [\"A\",\"B\",\"C\"] (flat array) or {\"rows\": [[\"A\",\"B\"],[\"C\"]]} (struct): %w", err)
+	}
+	ah.Rows = raw.Rows
+	return nil
 }
 
 // EdgeHint provides per-edge routing overrides.
@@ -52,6 +77,10 @@ type NodeHint struct {
 	Y *float64 `json:"y,omitempty"`
 	// MinWidth sets a minimum width for the node container.
 	MinWidth *float64 `json:"minWidth,omitempty"`
+	// ChildDirection overrides how children inside this container are arranged.
+	// Values: "horizontal" (side-by-side), "vertical" (stacked, default).
+	// Applied before the inner engine runs by setting D2's direction attribute.
+	ChildDirection string `json:"childDirection,omitempty"`
 }
 
 // WaypointHint is an absolute coordinate point for edge routing.
@@ -61,8 +90,12 @@ type WaypointHint struct {
 }
 
 // SpacingHints overrides layout spacing.
+// Accepts "gap" for uniform spacing, or "horizontal"/"vertical" for independent control.
+// If horizontal/vertical are set, they take precedence over gap.
 type SpacingHints struct {
-	Gap *int `json:"gap,omitempty"`
+	Gap        *int `json:"gap,omitempty"`
+	Horizontal *int `json:"horizontal,omitempty"`
+	Vertical   *int `json:"vertical,omitempty"`
 }
 
 // LoadHints reads and parses a hints JSON file. Returns nil if the file does not exist.

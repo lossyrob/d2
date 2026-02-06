@@ -50,9 +50,24 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 	}
 
 	// Apply spacing override from hints
-	gap := float64(opts.Gap)
-	if hints != nil && hints.Spacing != nil && hints.Spacing.Gap != nil {
-		gap = float64(*hints.Spacing.Gap)
+	hGap := float64(opts.Gap)
+	vGap := float64(opts.Gap)
+	if hints != nil && hints.Spacing != nil {
+		if hints.Spacing.Gap != nil {
+			hGap = float64(*hints.Spacing.Gap)
+			vGap = float64(*hints.Spacing.Gap)
+		}
+		if hints.Spacing.Horizontal != nil {
+			hGap = float64(*hints.Spacing.Horizontal)
+		}
+		if hints.Spacing.Vertical != nil {
+			vGap = float64(*hints.Spacing.Vertical)
+		}
+	}
+
+	// Apply childDirection hints before inner engine (affects intra-container layout)
+	if hints != nil && len(hints.Nodes) > 0 {
+		applyChildDirectionHints(g, hints)
 	}
 
 	// Step 1: Delegate to inner engine
@@ -77,11 +92,11 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 	if hints != nil && hints.Arrangement != nil && len(hints.Arrangement.Rows) > 0 {
 		bestArrangement = applyArrangementHints(topLevel, hints.Arrangement)
 	} else {
-		bestArrangement = findBestArrangement(topLevel, bboxes, gap, opts.Ratio)
+		bestArrangement = findBestArrangement(topLevel, bboxes, hGap, opts.Ratio)
 	}
 
 	// Step 5+6: Reposition nodes and shift internal edges
-	layout := repositionNodes(g, topLevel, bboxes, bestArrangement, gap, hints)
+	layout := repositionNodes(g, topLevel, bboxes, bestArrangement, hGap, vGap, hints)
 
 	// Step 7: Re-route cross-boundary edges
 	rerouteCrossBoundaryEdges(g, topLevel, layout, hints)
@@ -91,7 +106,7 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 
 	// Step 9: Export layout state if path is set
 	if opts.LayoutStatePath != "" {
-		state := ExportLayoutState(g, layout)
+		state := ExportLayoutState(g, layout, hints)
 		if err := WriteLayoutState(state, opts.LayoutStatePath); err != nil {
 			fmt.Fprintf(os.Stderr, "widescreen: warning: failed to write layout state: %v\n", err)
 		}
@@ -137,6 +152,58 @@ func ComputeSubtreeBBox(obj *d2graph.Object) *geo.Box {
 		return geo.NewBox(geo.NewPoint(0, 0), 0, 0)
 	}
 	return geo.NewBox(geo.NewPoint(minX, minY), maxX-minX, maxY-minY)
+}
+
+// applyChildDirectionHints sets the direction attribute on containers before the inner engine runs.
+func applyChildDirectionHints(g *d2graph.Graph, hints *LayoutHints) {
+	for nodeID, nh := range hints.Nodes {
+		if nh.ChildDirection == "" {
+			continue
+		}
+		dir := ""
+		switch nh.ChildDirection {
+		case "horizontal", "right":
+			dir = "right"
+		case "vertical", "down":
+			dir = "down"
+		case "left":
+			dir = "left"
+		case "up":
+			dir = "up"
+		default:
+			fmt.Fprintf(os.Stderr, "widescreen: warning: unknown childDirection %q for %q\n", nh.ChildDirection, nodeID)
+			continue
+		}
+		obj := findObjectByID(g, nodeID)
+		if obj == nil {
+			fmt.Fprintf(os.Stderr, "widescreen: warning: childDirection hint for unknown node %q\n", nodeID)
+			continue
+		}
+		if len(obj.ChildrenArray) > 0 {
+			obj.Direction.Value = dir
+		}
+	}
+}
+
+// findObjectByID searches the graph for an object by its ID or AbsID.
+func findObjectByID(g *d2graph.Graph, id string) *d2graph.Object {
+	// Try top-level first
+	for _, obj := range g.Root.ChildrenArray {
+		if obj.ID == id || obj.AbsID() == id {
+			return obj
+		}
+		// Search descendants
+		var found *d2graph.Object
+		obj.IterDescendants(func(_, child *d2graph.Object) {
+			if child.AbsID() == id || child.ID == id {
+				found = child
+			}
+		})
+		if found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 // arrangement represents a row grouping: which nodes go in which row.
@@ -373,7 +440,7 @@ type gridLayout struct {
 	bboxes     map[*d2graph.Object]*geo.Box // post-reposition bboxes
 }
 
-func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, arr arrangement, gap float64, hints *LayoutHints) *gridLayout {
+func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, arr arrangement, hGap, vGap float64, hints *LayoutHints) *gridLayout {
 	// Pre-compute deltas for each top-level node
 	cursorY := 0.0
 	deltas := make(map[*d2graph.Object][2]float64)
@@ -391,7 +458,7 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 			rowWidth += bboxes[idx].Width
 		}
 		if len(row) > 1 {
-			rowWidth += gap * float64(len(row)-1)
+			rowWidth += hGap * float64(len(row)-1)
 		}
 		rowWidths[rowIdx] = rowWidth
 		rowHeights[rowIdx] = rowHeight
@@ -411,9 +478,9 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 			dy := cursorY - bbox.TopLeft.Y
 			deltas[obj] = [2]float64{dx, dy}
 
-			cursorX += bbox.Width + gap
+			cursorX += bbox.Width + hGap
 		}
-		cursorY += rowHeight + gap
+		cursorY += rowHeight + vGap
 	}
 
 	// Apply node position hints: override computed positions with agent-specified x/y
@@ -472,7 +539,7 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 	// Build grid layout info
 	gl := &gridLayout{
 		rows:    arr.rows,
-		gap:     gap,
+		gap:     hGap,
 		nodeRow: make(map[*d2graph.Object]int),
 		nodeCol: make(map[*d2graph.Object]int),
 		bboxes:  make(map[*d2graph.Object]*geo.Box),
@@ -489,7 +556,7 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 			gl.nodeCol[obj] = colIdx
 			gl.bboxes[obj] = ComputeSubtreeBBox(obj)
 		}
-		curY += rh + gap
+		curY += rh + vGap
 	}
 
 	return gl

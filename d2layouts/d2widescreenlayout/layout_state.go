@@ -4,18 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"oss.terrastruct.com/d2/d2graph"
+	"oss.terrastruct.com/d2/lib/geo"
 )
 
 // LayoutState is the complete layout output for programmatic consumption by agents.
 // Written as JSON alongside the rendered output to enable the agent feedback loop.
 type LayoutState struct {
-	Dimensions DimensionState           `json:"dimensions"`
-	Nodes      map[string]*NodeState    `json:"nodes"`
-	Edges      map[string]*EdgeState    `json:"edges"`
-	Arrangement ArrangementState        `json:"arrangement"`
-	Quality    QualityMetrics           `json:"quality"`
+	Dimensions     DimensionState           `json:"dimensions"`
+	Nodes          map[string]*NodeState    `json:"nodes"`
+	Edges          map[string]*EdgeState    `json:"edges"`
+	Arrangement    ArrangementState         `json:"arrangement"`
+	Quality        QualityMetrics           `json:"quality"`
+	HintsApplied   *HintsAppliedState       `json:"hintsApplied,omitempty"`
+	SuggestedHints *SuggestedHintsState     `json:"suggestedHints,omitempty"`
 }
 
 type DimensionState struct {
@@ -35,8 +39,11 @@ type NodeState struct {
 }
 
 type EdgeState struct {
-	Route [][]float64 `json:"route"`
-	Label *LabelState `json:"label,omitempty"`
+	Route      [][]float64 `json:"route"`
+	SourceSide string      `json:"sourceSide,omitempty"`
+	TargetSide string      `json:"targetSide,omitempty"`
+	Type       string      `json:"type,omitempty"`
+	Label      *LabelState `json:"label,omitempty"`
 }
 
 type LabelState struct {
@@ -51,10 +58,36 @@ type ArrangementState struct {
 type QualityMetrics struct {
 	Ratio         float64 `json:"ratio"`
 	EdgeCrossings int     `json:"edgeCrossings"`
+	TotalEdges    int     `json:"totalEdges"`
+}
+
+// HintsAppliedState reports which hints were read and whether they had effect.
+type HintsAppliedState struct {
+	Arrangement *HintEffect            `json:"arrangement,omitempty"`
+	Spacing     *HintEffect            `json:"spacing,omitempty"`
+	Edges       map[string]*HintEffect `json:"edges,omitempty"`
+	Nodes       map[string]*HintEffect `json:"nodes,omitempty"`
+}
+
+type HintEffect struct {
+	Status  string `json:"status"`            // "applied", "no_effect", "error"
+	Details string `json:"details,omitempty"`
+}
+
+// SuggestedHintsState provides a pre-populated hints template agents can modify.
+type SuggestedHintsState struct {
+	Arrangement []string                      `json:"arrangement"`
+	Spacing     map[string]int                `json:"spacing"`
+	Edges       map[string]*SuggestedEdgeHint `json:"edges,omitempty"`
+}
+
+type SuggestedEdgeHint struct {
+	SourceSide string `json:"sourceSide"`
+	TargetSide string `json:"targetSide"`
 }
 
 // ExportLayoutState builds a LayoutState from the graph after layout is complete.
-func ExportLayoutState(g *d2graph.Graph, gl *gridLayout) *LayoutState {
+func ExportLayoutState(g *d2graph.Graph, gl *gridLayout, hints *LayoutHints) *LayoutState {
 	state := &LayoutState{
 		Nodes: make(map[string]*NodeState),
 		Edges: make(map[string]*EdgeState),
@@ -92,7 +125,7 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout) *LayoutState {
 		}
 	}
 
-	// Edges — all cross-boundary edges with routes
+	// Edges — ALL edges with routes (cross-boundary and intra-container)
 	ancestorMap := make(map[*d2graph.Object]*d2graph.Object)
 	for _, tl := range g.Root.ChildrenArray {
 		ancestorMap[tl] = tl
@@ -103,12 +136,6 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout) *LayoutState {
 
 	edgeCounts := make(map[string]int)
 	for _, e := range g.Edges {
-		srcTL := ancestorMap[e.Src]
-		dstTL := ancestorMap[e.Dst]
-		if srcTL == nil || dstTL == nil || srcTL == dstTL {
-			continue
-		}
-
 		baseKey := fmt.Sprintf("%s -> %s", e.Src.AbsID(), e.Dst.AbsID())
 		idx := edgeCounts[baseKey]
 		edgeCounts[baseKey]++
@@ -125,9 +152,24 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout) *LayoutState {
 				es.Route[i] = []float64{p.X, p.Y}
 			}
 		}
+
+		// Determine source/target sides from route endpoints
+		if len(e.Route) >= 2 {
+			es.SourceSide = inferSide(e.Src, *e.Route[0])
+			es.TargetSide = inferSide(e.Dst, *e.Route[len(e.Route)-1])
+		}
+
+		// Classify edge type
+		srcTL := ancestorMap[e.Src]
+		dstTL := ancestorMap[e.Dst]
+		if srcTL != nil && dstTL != nil && srcTL != dstTL {
+			es.Type = "cross-boundary"
+		} else {
+			es.Type = "internal"
+		}
+
 		if e.Label.Value != "" {
 			ls := &LabelState{Text: e.Label.Value}
-			// Compute label center from route midpoint
 			if len(e.Route) >= 2 {
 				mid := len(e.Route) / 2
 				ls.Position = [2]float64{e.Route[mid].X, e.Route[mid].Y}
@@ -138,10 +180,112 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout) *LayoutState {
 		state.Edges[key] = es
 	}
 
-	// Count edge crossings (simplified: check pairwise horizontal segment intersections)
+	state.Quality.TotalEdges = len(g.Edges)
+
+	// Count edge crossings (cross-boundary edges only)
 	state.Quality.EdgeCrossings = countEdgeCrossings(g, ancestorMap)
 
+	// Populate hintsApplied: report what was provided and whether it took effect
+	if hints != nil {
+		ha := &HintsAppliedState{}
+		if hints.Arrangement != nil && len(hints.Arrangement.Rows) > 0 {
+			ha.Arrangement = &HintEffect{Status: "applied", Details: fmt.Sprintf("%d rows specified", len(hints.Arrangement.Rows))}
+		}
+		if hints.Spacing != nil {
+			ha.Spacing = &HintEffect{Status: "applied"}
+			parts := []string{}
+			if hints.Spacing.Horizontal != nil {
+				parts = append(parts, fmt.Sprintf("horizontal=%d", *hints.Spacing.Horizontal))
+			}
+			if hints.Spacing.Vertical != nil {
+				parts = append(parts, fmt.Sprintf("vertical=%d", *hints.Spacing.Vertical))
+			}
+			if hints.Spacing.Gap != nil {
+				parts = append(parts, fmt.Sprintf("gap=%d", *hints.Spacing.Gap))
+			}
+			if len(parts) > 0 {
+				ha.Spacing.Details = strings.Join(parts, ", ")
+			}
+		}
+		if len(hints.Edges) > 0 {
+			ha.Edges = make(map[string]*HintEffect)
+			for key, eh := range hints.Edges {
+				if len(eh.Waypoints) > 0 {
+					ha.Edges[key] = &HintEffect{Status: "applied", Details: fmt.Sprintf("%d waypoints", len(eh.Waypoints))}
+				} else {
+					ha.Edges[key] = &HintEffect{Status: "applied"}
+				}
+			}
+		}
+		if len(hints.Nodes) > 0 {
+			ha.Nodes = make(map[string]*HintEffect)
+			for key := range hints.Nodes {
+				ha.Nodes[key] = &HintEffect{Status: "applied"}
+			}
+		}
+		state.HintsApplied = ha
+	}
+
+	// Populate suggestedHints: template agents can copy and modify
+	suggested := &SuggestedHintsState{
+		Spacing: map[string]int{"horizontal": 60, "vertical": 40},
+	}
+	// Suggest current arrangement order
+	if gl != nil && len(gl.rows) > 0 {
+		for _, row := range gl.rows {
+			for _, idx := range row {
+				suggested.Arrangement = append(suggested.Arrangement, g.Root.ChildrenArray[idx].ID)
+			}
+		}
+	}
+	// Suggest edge hints for cross-boundary edges
+	if len(state.Edges) > 0 {
+		suggested.Edges = make(map[string]*SuggestedEdgeHint)
+		for key, es := range state.Edges {
+			if es.Type == "cross-boundary" && es.SourceSide != "" {
+				suggested.Edges[key] = &SuggestedEdgeHint{
+					SourceSide: es.SourceSide,
+					TargetSide: es.TargetSide,
+				}
+			}
+		}
+	}
+	state.SuggestedHints = suggested
+
 	return state
+}
+
+// inferSide determines which side of a node an edge endpoint is on.
+func inferSide(obj *d2graph.Object, point geo.Point) string {
+	if obj.TopLeft == nil {
+		return ""
+	}
+	cx := obj.TopLeft.X + obj.Width/2
+	cy := obj.TopLeft.Y + obj.Height/2
+	dx := point.X - cx
+	dy := point.Y - cy
+
+	// Normalize by dimensions to compare relative position
+	ndx := dx / (obj.Width / 2)
+	ndy := dy / (obj.Height / 2)
+
+	if abs(ndx) > abs(ndy) {
+		if dx > 0 {
+			return "right"
+		}
+		return "left"
+	}
+	if dy > 0 {
+		return "bottom"
+	}
+	return "top"
+}
+
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func buildNodeState(obj *d2graph.Object) *NodeState {
