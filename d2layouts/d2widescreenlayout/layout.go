@@ -65,7 +65,7 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 		}
 	}
 
-	// Apply childDirection hints before inner engine (affects intra-container layout)
+	// Apply childDirection hints before inner engine (sets attribute for dagre)
 	if hints != nil && len(hints.Nodes) > 0 {
 		applyChildDirectionHints(g, hints)
 	}
@@ -80,6 +80,11 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 		setRootDimensions(g)
 		return nil
 	}
+
+	// Step 2: Post-process childDirection — rearrange children that dagre stacked vertically
+	// despite direction: right (dagre's global ranking overrides per-container direction
+	// when cross-boundary edges exist)
+	enforceChildDirection(g, hints)
 
 	// Step 3: Compute bounding boxes for each top-level node
 	bboxes := make([]*geo.Box, len(topLevel))
@@ -204,6 +209,132 @@ func findObjectByID(g *d2graph.Graph, id string) *d2graph.Object {
 		}
 	}
 	return nil
+}
+
+// enforceChildDirection post-processes containers after dagre layout.
+// Dagre's global ranking can override per-container `direction: right` when
+// cross-boundary edges exist. This function detects containers whose children
+// should be horizontal (via D2 `direction: right` or childDirection hint) and
+// physically rearranges them side-by-side after dagre has finished.
+func enforceChildDirection(g *d2graph.Graph, hints *LayoutHints) {
+	for _, obj := range g.Root.ChildrenArray {
+		wantHorizontal := false
+
+		// Check D2 source direction attribute
+		if obj.Direction.Value == "right" || obj.Direction.Value == "left" {
+			wantHorizontal = true
+		}
+
+		// Check hint override
+		if hints != nil && hints.Nodes != nil {
+			if nh, ok := hints.Nodes[obj.ID]; ok {
+				if nh.ChildDirection == "horizontal" || nh.ChildDirection == "right" {
+					wantHorizontal = true
+				}
+			}
+		}
+
+		if !wantHorizontal || len(obj.ChildrenArray) < 2 {
+			continue
+		}
+
+		// Check if children are already horizontal (width > height arrangement)
+		childBBox := ComputeChildrenBBox(obj)
+		if childBBox.Width >= childBBox.Height {
+			continue // already horizontal, dagre got it right
+		}
+
+		// Rearrange children side-by-side
+		rearrangeChildrenHorizontally(obj, g)
+	}
+}
+
+// ComputeChildrenBBox computes the bounding box of just the direct children of an object.
+func ComputeChildrenBBox(obj *d2graph.Object) *geo.Box {
+	if len(obj.ChildrenArray) == 0 {
+		return geo.NewBox(geo.NewPoint(0, 0), 0, 0)
+	}
+	minX, minY := math.Inf(1), math.Inf(1)
+	maxX, maxY := math.Inf(-1), math.Inf(-1)
+	for _, child := range obj.ChildrenArray {
+		if child.TopLeft == nil {
+			continue
+		}
+		if child.TopLeft.X < minX {
+			minX = child.TopLeft.X
+		}
+		if child.TopLeft.Y < minY {
+			minY = child.TopLeft.Y
+		}
+		if child.TopLeft.X+child.Width > maxX {
+			maxX = child.TopLeft.X + child.Width
+		}
+		if child.TopLeft.Y+child.Height > maxY {
+			maxY = child.TopLeft.Y + child.Height
+		}
+	}
+	return geo.NewBox(geo.NewPoint(minX, minY), maxX-minX, maxY-minY)
+}
+
+// rearrangeChildrenHorizontally takes children that are stacked vertically
+// and places them side-by-side, starting from the container's internal top-left.
+func rearrangeChildrenHorizontally(container *d2graph.Object, g *d2graph.Graph) {
+	children := container.ChildrenArray
+	if len(children) == 0 {
+		return
+	}
+
+	const padding = 12.0
+	const childGap = 20.0
+
+	// Compute starting position: container top-left + padding
+	startX := container.TopLeft.X + padding
+	startY := container.TopLeft.Y + padding + 30 // 30px for container label
+
+	// Place children side-by-side
+	cursorX := startX
+	maxHeight := 0.0
+	for _, child := range children {
+		if child.Height > maxHeight {
+			maxHeight = child.Height
+		}
+	}
+
+	for _, child := range children {
+		if child.TopLeft == nil {
+			continue
+		}
+		dx := cursorX - child.TopLeft.X
+		dy := startY - child.TopLeft.Y
+
+		// Center vertically within the row
+		dy += (maxHeight - child.Height) / 2
+
+		child.MoveWithDescendants(dx, dy)
+
+		// Also move internal edges
+		for _, e := range g.Edges {
+			if e.Src.IsDescendantOf(child) && e.Dst.IsDescendantOf(child) {
+				e.Move(dx, dy)
+			}
+		}
+
+		cursorX += child.Width + childGap
+	}
+
+	// Resize the container to fit its new children layout
+	totalChildWidth := cursorX - startX - childGap
+	newWidth := totalChildWidth + 2*padding
+	newHeight := maxHeight + 2*padding + 30 // label + top/bottom padding
+
+	container.Width = math.Max(newWidth, container.Width)
+	container.Height = newHeight
+
+	// Recompute container box
+	if container.Box != nil {
+		container.Box.Width = container.Width
+		container.Box.Height = container.Height
+	}
 }
 
 // arrangement represents a row grouping: which nodes go in which row.
