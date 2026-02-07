@@ -192,7 +192,7 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout, hints *LayoutHints) *La
 	// Count edge crossings (cross-boundary edges only)
 	state.Quality.EdgeCrossings = countEdgeCrossings(g, ancestorMap)
 
-	// Count backward edges: cross-boundary edges where source is to the right of target
+	// Count backward edges: row-backward + visual-backward (route goes leftward > 50px)
 	if gl != nil {
 		for _, e := range g.Edges {
 			srcTL := ancestorMap[e.Src]
@@ -200,12 +200,22 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout, hints *LayoutHints) *La
 			if srcTL == nil || dstTL == nil || srcTL == dstTL {
 				continue
 			}
+			// Row-based backward: source column to right of target column across rows
 			srcRow := gl.nodeRow[srcTL]
 			dstRow := gl.nodeRow[dstTL]
 			srcCol := gl.nodeCol[srcTL]
 			dstCol := gl.nodeCol[dstTL]
 			if srcRow != dstRow && srcCol > dstCol {
 				state.Quality.BackwardEdges++
+				continue
+			}
+			// Visual-backward: the edge's route x-coordinates decrease by > 50px
+			if len(e.Route) >= 2 {
+				startX := e.Route[0].X
+				endX := e.Route[len(e.Route)-1].X
+				if startX-endX > 50.0 {
+					state.Quality.BackwardEdges++
+				}
 			}
 		}
 	}

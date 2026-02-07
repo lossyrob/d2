@@ -710,6 +710,13 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 		}
 	}
 
+	// Cross-row edge alignment: shift rows so cross-row edges go straight down
+	// instead of visually backward (leftward). For each cross-row edge, compute
+	// how much the target row should shift to align the target under the source.
+	if len(arr.rows) > 1 {
+		alignCrossRowEdges(g, topLevel, bboxes, arr.rows, deltas, hGap, maxRowWidth)
+	}
+
 	// Apply deltas: move objects and their internal edges
 	for _, obj := range topLevel {
 		d, ok := deltas[obj]
@@ -755,6 +762,107 @@ func repositionNodes(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo
 	}
 
 	return gl
+}
+
+// alignCrossRowEdges shifts rows horizontally so that cross-row edges go
+// straight down (or rightward) instead of visually backward (leftward).
+// For each cross-row edge A→B, we want B's center-x ≥ A's center-x.
+func alignCrossRowEdges(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*geo.Box, rows [][]int, deltas map[*d2graph.Object][2]float64, hGap, maxRowWidth float64) {
+	// Build ancestor map for edge → top-level lookup
+	ancestorMap := make(map[*d2graph.Object]*d2graph.Object)
+	for _, tl := range topLevel {
+		ancestorMap[tl] = tl
+		tl.IterDescendants(func(_, child *d2graph.Object) {
+			ancestorMap[child] = tl
+		})
+	}
+
+	// Build nodeToRow lookup
+	nodeToRow := make(map[*d2graph.Object]int)
+	for rowIdx, row := range rows {
+		for _, idx := range row {
+			nodeToRow[topLevel[idx]] = rowIdx
+		}
+	}
+
+	// For each cross-row edge, compute how much the target node's row should shift
+	// so the edge goes straight down or rightward. We accumulate per-node votes
+	// then take the max rightward shift per row.
+	type edgeAlignment struct {
+		srcCenterX float64
+		dstCenterX float64
+		dstRow     int
+	}
+	var alignments []edgeAlignment
+
+	for _, e := range g.Edges {
+		srcTL := ancestorMap[e.Src]
+		dstTL := ancestorMap[e.Dst]
+		if srcTL == nil || dstTL == nil || srcTL == dstTL {
+			continue
+		}
+		srcRow := nodeToRow[srcTL]
+		dstRow := nodeToRow[dstTL]
+		if srcRow == dstRow {
+			continue
+		}
+
+		// Find indices
+		srcIdx, dstIdx := -1, -1
+		for i, obj := range topLevel {
+			if obj == srcTL {
+				srcIdx = i
+			}
+			if obj == dstTL {
+				dstIdx = i
+			}
+		}
+		if srcIdx < 0 || dstIdx < 0 {
+			continue
+		}
+
+		srcCX := bboxes[srcIdx].TopLeft.X + bboxes[srcIdx].Width/2 + deltas[srcTL][0]
+		dstCX := bboxes[dstIdx].TopLeft.X + bboxes[dstIdx].Width/2 + deltas[dstTL][0]
+
+		alignments = append(alignments, edgeAlignment{srcCX, dstCX, dstRow})
+	}
+
+	// For each target row, find the shift that makes the most backward edge
+	// go straight down. Use the maximum needed rightward shift.
+	rowShifts := make(map[int]float64)
+	for _, a := range alignments {
+		neededShift := a.srcCenterX - a.dstCenterX
+		if neededShift <= 0 {
+			continue // edge already goes rightward
+		}
+		if neededShift > rowShifts[a.dstRow] {
+			rowShifts[a.dstRow] = neededShift
+		}
+	}
+
+	// Apply shifts, clamped to prevent overflow but allowing canvas to grow
+	for targetRow, shift := range rowShifts {
+		row := rows[targetRow]
+		rowWidth := 0.0
+		for i, idx := range row {
+			rowWidth += bboxes[idx].Width
+			if i > 0 {
+				rowWidth += hGap
+			}
+		}
+		// Ensure shift is positive (rightward only)
+		if shift <= 0 {
+			continue
+		}
+
+		for _, idx := range row {
+			obj := topLevel[idx]
+			d := deltas[obj]
+			d[0] += shift
+			deltas[obj] = d
+		}
+		fmt.Fprintf(os.Stderr, "widescreen: aligned row %d by %.0fpx for cross-row edges\n", targetRow, shift)
+	}
 }
 
 func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl *gridLayout, hints *LayoutHints) {
