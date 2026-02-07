@@ -1085,7 +1085,7 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 			midX := (srcMaxX + dstMinX) / 2
 
 			dy := dstCenter.Y - srcCenter.Y
-			if math.Abs(dy) < 1 {
+			if math.Abs(dy) < 5 {
 				route = []*geo.Point{
 					geo.NewPoint(srcCenter.X, srcCenter.Y),
 					geo.NewPoint(dstCenter.X, dstCenter.Y),
@@ -1113,7 +1113,7 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 			}
 			route = routeAroundObstacles(srcCenter, dstCenter, 0, forceSide, collectObstacleBBoxes(topLevel, gl, ce.srcTL, ce.dstTL))
 		} else {
-			// Normal cross-row route through horizontal channel
+			// Normal cross-row route through horizontal channel.
 			key := channelKey{r.channelIdx, 0}
 			totalInChannel := channelUsers[key]
 			laneIdx := channelLaneIdx[key]
@@ -1134,18 +1134,21 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 				midY = clamp(midY, gapTop+1, gapBottom-1)
 			}
 
-			// Spread vertical segments: offset departure/arrival X to avoid overlap
-			// Use laneOffset applied horizontally to the vertical segments
-			departX := srcCenter.X + laneOffset
-			arriveX := dstCenter.X + laneOffset
-
-			route = []*geo.Point{
-				geo.NewPoint(srcCenter.X, srcCenter.Y),
-				geo.NewPoint(departX, srcCenter.Y),
-				geo.NewPoint(departX, midY),
-				geo.NewPoint(arriveX, midY),
-				geo.NewPoint(arriveX, dstCenter.Y),
-				geo.NewPoint(dstCenter.X, dstCenter.Y),
+			// When src and dst are nearly vertically aligned, use a direct route
+			// to avoid short horizontal segments that SVG smooths into S-curves.
+			dx := math.Abs(srcCenter.X - dstCenter.X)
+			if dx < 40 {
+				route = []*geo.Point{
+					geo.NewPoint(srcCenter.X, srcCenter.Y),
+					geo.NewPoint(dstCenter.X, dstCenter.Y),
+				}
+			} else {
+				route = []*geo.Point{
+					geo.NewPoint(srcCenter.X, srcCenter.Y),
+					geo.NewPoint(srcCenter.X, midY),
+					geo.NewPoint(dstCenter.X, midY),
+					geo.NewPoint(dstCenter.X, dstCenter.Y),
+				}
 			}
 
 			// Simplify: remove zero-length segments
