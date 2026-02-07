@@ -84,7 +84,7 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 	// Step 2: Post-process childDirection — rearrange children that dagre stacked vertically
 	// despite direction: right (dagre's global ranking overrides per-container direction
 	// when cross-boundary edges exist)
-	enforceChildDirection(g, hints)
+	enforceChildDirection(g, hints, hGap)
 
 	// Step 3: Compute bounding boxes for each top-level node
 	bboxes := make([]*geo.Box, len(topLevel))
@@ -95,7 +95,7 @@ func Layout(ctx context.Context, g *d2graph.Graph, opts *ConfigurableOpts) error
 	// Step 4: Find best row arrangement (hints can override)
 	var bestArrangement arrangement
 	if hints != nil && hints.Arrangement != nil && len(hints.Arrangement.Rows) > 0 {
-		bestArrangement = applyArrangementHints(topLevel, hints.Arrangement)
+		bestArrangement = applyArrangementHints(topLevel, hints.Arrangement, bboxes, hGap, opts.Ratio)
 	} else {
 		bestArrangement = findBestArrangement(topLevel, bboxes, hGap, opts.Ratio)
 	}
@@ -216,7 +216,7 @@ func findObjectByID(g *d2graph.Graph, id string) *d2graph.Object {
 // cross-boundary edges exist. This function detects containers whose children
 // should be horizontal (via D2 `direction: right` or childDirection hint) and
 // physically rearranges them side-by-side after dagre has finished.
-func enforceChildDirection(g *d2graph.Graph, hints *LayoutHints) {
+func enforceChildDirection(g *d2graph.Graph, hints *LayoutHints, childGap float64) {
 	for _, obj := range g.Root.ChildrenArray {
 		wantHorizontal := false
 
@@ -245,7 +245,7 @@ func enforceChildDirection(g *d2graph.Graph, hints *LayoutHints) {
 		}
 
 		// Rearrange children side-by-side
-		rearrangeChildrenHorizontally(obj, g)
+		rearrangeChildrenHorizontally(obj, g, childGap)
 	}
 }
 
@@ -278,14 +278,16 @@ func ComputeChildrenBBox(obj *d2graph.Object) *geo.Box {
 
 // rearrangeChildrenHorizontally takes children that are stacked vertically
 // and places them side-by-side, starting from the container's internal top-left.
-func rearrangeChildrenHorizontally(container *d2graph.Object, g *d2graph.Graph) {
+func rearrangeChildrenHorizontally(container *d2graph.Object, g *d2graph.Graph, gap float64) {
 	children := container.ChildrenArray
 	if len(children) == 0 {
 		return
 	}
 
 	const padding = 12.0
-	const childGap = 20.0
+	if gap < 8.0 {
+		gap = 8.0 // minimum gap for readability
+	}
 
 	// Compute starting position: container top-left + padding
 	startX := container.TopLeft.X + padding
@@ -319,11 +321,11 @@ func rearrangeChildrenHorizontally(container *d2graph.Object, g *d2graph.Graph) 
 			}
 		}
 
-		cursorX += child.Width + childGap
+		cursorX += child.Width + gap
 	}
 
 	// Resize the container to fit its new children layout
-	totalChildWidth := cursorX - startX - childGap
+	totalChildWidth := cursorX - startX - gap
 	newWidth := totalChildWidth + 2*padding
 	newHeight := maxHeight + 2*padding + 30 // label + top/bottom padding
 
@@ -345,7 +347,7 @@ type arrangement struct {
 
 // applyArrangementHints builds an arrangement from agent-provided row assignments.
 // Unknown node IDs are warned and skipped; unlisted nodes go to the last row.
-func applyArrangementHints(topLevel []*d2graph.Object, ah *ArrangementHints) arrangement {
+func applyArrangementHints(topLevel []*d2graph.Object, ah *ArrangementHints, bboxes []*geo.Box, hGap, targetRatio float64) arrangement {
 	// Build name→index map
 	nameToIdx := make(map[string]int, len(topLevel))
 	for i, obj := range topLevel {
@@ -384,7 +386,69 @@ func applyArrangementHints(topLevel []*d2graph.Object, ah *ArrangementHints) arr
 		}
 	}
 
+	// Auto-break rows with extreme ratios (> 3.0) — only for flat-array hints.
+	// Explicit {"rows": [...]} are respected as-is since the user chose the grouping.
+	if bboxes != nil && !ah.ExplicitRows {
+		rows = autoBreakExtremeRows(rows, bboxes, hGap, targetRatio)
+	}
+
 	return arrangement{rows: rows}
+}
+
+// autoBreakExtremeRows splits any row whose width/height ratio exceeds
+// the max threshold (3.0) into two more balanced rows.
+func autoBreakExtremeRows(rows [][]int, bboxes []*geo.Box, gap, targetRatio float64) [][]int {
+	const maxRatio = 3.0
+	var result [][]int
+
+	for _, row := range rows {
+		ratio := computeRowRatio(row, bboxes, gap)
+		if ratio <= maxRatio || len(row) <= 2 {
+			result = append(result, row)
+			continue
+		}
+
+		// Find optimal split point that minimizes combined ratio deviation
+		bestSplit := len(row) / 2
+		bestScore := math.Inf(1)
+		for split := 1; split < len(row); split++ {
+			leftRatio := computeRowRatio(row[:split], bboxes, gap)
+			rightRatio := computeRowRatio(row[split:], bboxes, gap)
+			score := math.Abs(leftRatio-targetRatio) + math.Abs(rightRatio-targetRatio)
+			if score < bestScore {
+				bestScore = score
+				bestSplit = split
+			}
+		}
+
+		left := make([]int, bestSplit)
+		right := make([]int, len(row)-bestSplit)
+		copy(left, row[:bestSplit])
+		copy(right, row[bestSplit:])
+		result = append(result, left, right)
+		fmt.Fprintf(os.Stderr, "widescreen: auto-split row (ratio %.1f > %.1f) into %d + %d nodes\n",
+			ratio, maxRatio, len(left), len(right))
+	}
+	return result
+}
+
+func computeRowRatio(row []int, bboxes []*geo.Box, gap float64) float64 {
+	if len(row) == 0 {
+		return 0
+	}
+	width := 0.0
+	height := 0.0
+	for _, idx := range row {
+		width += bboxes[idx].Width
+		if bboxes[idx].Height > height {
+			height = bboxes[idx].Height
+		}
+	}
+	width += gap * float64(len(row)-1)
+	if height == 0 {
+		return 0
+	}
+	return width / height
 }
 
 func findBestArrangement(topLevel []*d2graph.Object, bboxes []*geo.Box, gap, targetRatio float64) arrangement {
@@ -840,6 +904,14 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 						}
 					}
 				}
+			}
+
+			// Backward edge detection: if source is to the RIGHT of target
+			// across rows, the Z-route wraps backward. Force detour.
+			srcCol := gl.nodeCol[ce.srcTL]
+			dstCol := gl.nodeCol[ce.dstTL]
+			if srcCol > dstCol {
+				r.needsDetour = true
 			}
 		}
 

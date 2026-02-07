@@ -26,6 +26,9 @@ type ArrangementHints struct {
 	// Rows specifies which top-level node IDs go in each row.
 	// Nodes not listed are appended to the last row.
 	Rows [][]string `json:"rows"`
+	// ExplicitRows is true when the user specified explicit row groupings.
+	// When false (flat array shorthand), the engine may auto-break extreme rows.
+	ExplicitRows bool `json:"-"`
 }
 
 // UnmarshalJSON allows ArrangementHints to accept either a flat string array
@@ -35,6 +38,7 @@ func (ah *ArrangementHints) UnmarshalJSON(data []byte) error {
 	var flat []string
 	if err := json.Unmarshal(data, &flat); err == nil {
 		ah.Rows = [][]string{flat}
+		ah.ExplicitRows = false
 		return nil
 	}
 
@@ -47,6 +51,7 @@ func (ah *ArrangementHints) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("arrangement must be either [\"A\",\"B\",\"C\"] (flat array) or {\"rows\": [[\"A\",\"B\"],[\"C\"]]} (struct): %w", err)
 	}
 	ah.Rows = raw.Rows
+	ah.ExplicitRows = true
 	return nil
 }
 

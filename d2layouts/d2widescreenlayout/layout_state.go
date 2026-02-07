@@ -13,6 +13,7 @@ import (
 // LayoutState is the complete layout output for programmatic consumption by agents.
 // Written as JSON alongside the rendered output to enable the agent feedback loop.
 type LayoutState struct {
+	EngineVersion  string                   `json:"engineVersion"`
 	Dimensions     DimensionState           `json:"dimensions"`
 	Nodes          map[string]*NodeState    `json:"nodes"`
 	Edges          map[string]*EdgeState    `json:"edges"`
@@ -21,6 +22,10 @@ type LayoutState struct {
 	HintsApplied   *HintsAppliedState       `json:"hintsApplied,omitempty"`
 	SuggestedHints *SuggestedHintsState     `json:"suggestedHints,omitempty"`
 }
+
+// EngineVersionString is the current version of the widescreen layout engine.
+// Agents should check this to verify binary freshness.
+const EngineVersionString = "0.8.0"
 
 type DimensionState struct {
 	Width  float64 `json:"width"`
@@ -59,6 +64,7 @@ type QualityMetrics struct {
 	Ratio         float64 `json:"ratio"`
 	EdgeCrossings int     `json:"edgeCrossings"`
 	TotalEdges    int     `json:"totalEdges"`
+	BackwardEdges int     `json:"backwardEdges"`
 }
 
 // HintsAppliedState reports which hints were read and whether they had effect.
@@ -89,8 +95,9 @@ type SuggestedEdgeHint struct {
 // ExportLayoutState builds a LayoutState from the graph after layout is complete.
 func ExportLayoutState(g *d2graph.Graph, gl *gridLayout, hints *LayoutHints) *LayoutState {
 	state := &LayoutState{
-		Nodes: make(map[string]*NodeState),
-		Edges: make(map[string]*EdgeState),
+		EngineVersion: EngineVersionString,
+		Nodes:         make(map[string]*NodeState),
+		Edges:         make(map[string]*EdgeState),
 	}
 
 	// Dimensions
@@ -184,6 +191,24 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout, hints *LayoutHints) *La
 
 	// Count edge crossings (cross-boundary edges only)
 	state.Quality.EdgeCrossings = countEdgeCrossings(g, ancestorMap)
+
+	// Count backward edges: cross-boundary edges where source is to the right of target
+	if gl != nil {
+		for _, e := range g.Edges {
+			srcTL := ancestorMap[e.Src]
+			dstTL := ancestorMap[e.Dst]
+			if srcTL == nil || dstTL == nil || srcTL == dstTL {
+				continue
+			}
+			srcRow := gl.nodeRow[srcTL]
+			dstRow := gl.nodeRow[dstTL]
+			srcCol := gl.nodeCol[srcTL]
+			dstCol := gl.nodeCol[dstTL]
+			if srcRow != dstRow && srcCol > dstCol {
+				state.Quality.BackwardEdges++
+			}
+		}
+	}
 
 	// Populate hintsApplied: report what was provided and whether it took effect
 	if hints != nil {
