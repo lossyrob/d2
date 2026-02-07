@@ -1015,12 +1015,10 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 			}
 
 			// Backward edge detection: if source is to the RIGHT of target
-			// across rows, the Z-route wraps backward. Force detour.
-			srcCol := gl.nodeCol[ce.srcTL]
-			dstCol := gl.nodeCol[ce.dstTL]
-			if srcCol > dstCol {
-				r.needsDetour = true
-			}
+			// across rows, the Z-route may wrap backward. However, the
+			// cross-row alignment pass already shifts rows to minimize this.
+			// Only force detour if the Z-route would actually cross obstacles.
+			// (Removed unconditional detour — let alignment handle it.)
 		}
 
 		routings[i] = r

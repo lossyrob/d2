@@ -192,30 +192,18 @@ func ExportLayoutState(g *d2graph.Graph, gl *gridLayout, hints *LayoutHints) *La
 	// Count edge crossings (cross-boundary edges only)
 	state.Quality.EdgeCrossings = countEdgeCrossings(g, ancestorMap)
 
-	// Count backward edges: row-backward + visual-backward (route goes leftward > 50px)
-	if gl != nil {
-		for _, e := range g.Edges {
-			srcTL := ancestorMap[e.Src]
-			dstTL := ancestorMap[e.Dst]
-			if srcTL == nil || dstTL == nil || srcTL == dstTL {
-				continue
-			}
-			// Row-based backward: source column to right of target column across rows
-			srcRow := gl.nodeRow[srcTL]
-			dstRow := gl.nodeRow[dstTL]
-			srcCol := gl.nodeCol[srcTL]
-			dstCol := gl.nodeCol[dstTL]
-			if srcRow != dstRow && srcCol > dstCol {
+	// Count backward edges: edges where the route goes visually leftward (>50px)
+	for _, e := range g.Edges {
+		srcTL := ancestorMap[e.Src]
+		dstTL := ancestorMap[e.Dst]
+		if srcTL == nil || dstTL == nil || srcTL == dstTL {
+			continue
+		}
+		if len(e.Route) >= 2 {
+			startX := e.Route[0].X
+			endX := e.Route[len(e.Route)-1].X
+			if startX-endX > 50.0 {
 				state.Quality.BackwardEdges++
-				continue
-			}
-			// Visual-backward: the edge's route x-coordinates decrease by > 50px
-			if len(e.Route) >= 2 {
-				startX := e.Route[0].X
-				endX := e.Route[len(e.Route)-1].X
-				if startX-endX > 50.0 {
-					state.Quality.BackwardEdges++
-				}
 			}
 		}
 	}
