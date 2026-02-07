@@ -25,7 +25,7 @@ type LayoutState struct {
 
 // EngineVersionString is the current version of the widescreen layout engine.
 // Agents should check this to verify binary freshness.
-const EngineVersionString = "0.8.0"
+const EngineVersionString = "0.9.0"
 
 type DimensionState struct {
 	Width  float64 `json:"width"`

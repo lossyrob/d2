@@ -807,7 +807,7 @@ func alignCrossRowEdges(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*
 			continue
 		}
 
-		// Find indices
+		// Find top-level indices
 		srcIdx, dstIdx := -1, -1
 		for i, obj := range topLevel {
 			if obj == srcTL {
@@ -821,8 +821,12 @@ func alignCrossRowEdges(g *d2graph.Graph, topLevel []*d2graph.Object, bboxes []*
 			continue
 		}
 
-		srcCX := bboxes[srcIdx].TopLeft.X + bboxes[srcIdx].Width/2 + deltas[srcTL][0]
-		dstCX := bboxes[dstIdx].TopLeft.X + bboxes[dstIdx].Width/2 + deltas[dstTL][0]
+		// Use actual source/destination centers (handles child-to-child edges).
+		// The source center is the actual child's center after deltas are applied.
+		srcCenter := e.Src.Center()
+		dstCenter := e.Dst.Center()
+		srcCX := srcCenter.X + deltas[srcTL][0]
+		dstCX := dstCenter.X + deltas[dstTL][0]
 
 		alignments = append(alignments, edgeAlignment{srcCX, dstCX, dstRow})
 	}
@@ -882,6 +886,10 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 	}
 	var crossEdges []crossEdge
 
+	// Track container pairs with child-level edges (for crossing avoidance)
+	type containerPairKey struct{ src, dst *d2graph.Object }
+	hasChildEdges := make(map[containerPairKey]bool)
+
 	for _, e := range g.Edges {
 		srcTL := ancestorMap[e.Src]
 		dstTL := ancestorMap[e.Dst]
@@ -889,6 +897,11 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 			continue
 		}
 		crossEdges = append(crossEdges, crossEdge{e, srcTL, dstTL})
+		// If edge endpoints are children (not the containers themselves), mark as child-level
+		if e.Src != srcTL || e.Dst != dstTL {
+			hasChildEdges[containerPairKey{srcTL, dstTL}] = true
+			hasChildEdges[containerPairKey{dstTL, srcTL}] = true
+		}
 	}
 
 	if len(crossEdges) == 0 {
@@ -1019,6 +1032,15 @@ func rerouteCrossBoundaryEdges(g *d2graph.Graph, topLevel []*d2graph.Object, gl 
 			// cross-row alignment pass already shifts rows to minimize this.
 			// Only force detour if the Z-route would actually cross obstacles.
 			// (Removed unconditional detour — let alignment handle it.)
+
+			// Container-level edge with existing child edges: force detour right
+			// to avoid crossing child edge routes through the channel.
+			if ce.edge.Src == ce.srcTL && ce.edge.Dst == ce.dstTL {
+				pk := containerPairKey{ce.srcTL, ce.dstTL}
+				if hasChildEdges[pk] {
+					r.needsDetour = true
+				}
+			}
 		}
 
 		routings[i] = r
