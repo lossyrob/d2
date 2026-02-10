@@ -211,6 +211,34 @@ func findObjectByID(g *d2graph.Graph, id string) *d2graph.Object {
 	return nil
 }
 
+// reorderChildren reorders a container's ChildrenArray according to the given ID order.
+// Children not listed in the order are appended at the end in their original order.
+func reorderChildren(container *d2graph.Object, order []string) {
+	idToChild := make(map[string]*d2graph.Object, len(container.ChildrenArray))
+	for _, child := range container.ChildrenArray {
+		idToChild[child.ID] = child
+	}
+
+	placed := make(map[string]bool)
+	result := make([]*d2graph.Object, 0, len(container.ChildrenArray))
+
+	for _, id := range order {
+		if child, ok := idToChild[id]; ok && !placed[id] {
+			result = append(result, child)
+			placed[id] = true
+		}
+	}
+
+	// Append unlisted children in original order
+	for _, child := range container.ChildrenArray {
+		if !placed[child.ID] {
+			result = append(result, child)
+		}
+	}
+
+	container.ChildrenArray = result
+}
+
 // enforceChildDirection post-processes containers after dagre layout.
 // Dagre's global ranking can override per-container `direction: right` when
 // cross-boundary edges exist. This function detects containers whose children
@@ -238,9 +266,19 @@ func enforceChildDirection(g *d2graph.Graph, hints *LayoutHints, childGap float6
 			continue
 		}
 
+		// Apply childOrder hint: reorder children before horizontal rearrangement
+		hasChildOrder := false
+		if hints != nil && hints.Nodes != nil {
+			if nh, ok := hints.Nodes[obj.ID]; ok && len(nh.ChildOrder) > 0 {
+				reorderChildren(obj, nh.ChildOrder)
+				hasChildOrder = true
+			}
+		}
+
 		// Check if children are already horizontal (width > height arrangement)
+		// Skip this check when childOrder is specified — always rearrange to apply the ordering
 		childBBox := ComputeChildrenBBox(obj)
-		if childBBox.Width >= childBBox.Height {
+		if !hasChildOrder && childBBox.Width >= childBBox.Height {
 			continue // already horizontal, dagre got it right
 		}
 
@@ -336,6 +374,41 @@ func rearrangeChildrenHorizontally(container *d2graph.Object, g *d2graph.Graph, 
 	if container.Box != nil {
 		container.Box.Width = container.Width
 		container.Box.Height = container.Height
+	}
+
+	// Reset cross-sibling edge routes — dagre's routes are invalid after rearrangement
+	childSet := make(map[*d2graph.Object]bool, len(children))
+	for _, child := range children {
+		childSet[child] = true
+	}
+	for _, e := range g.Edges {
+		srcInContainer := childSet[e.Src] || e.Src.IsDescendantOf(container)
+		dstInContainer := childSet[e.Dst] || e.Dst.IsDescendantOf(container)
+		if !srcInContainer || !dstInContainer {
+			continue
+		}
+		// Skip edges fully within a single child (already moved correctly)
+		sameChild := false
+		for _, child := range children {
+			if (e.Src == child || e.Src.IsDescendantOf(child)) &&
+				(e.Dst == child || e.Dst.IsDescendantOf(child)) {
+				sameChild = true
+				break
+			}
+		}
+		if sameChild {
+			continue
+		}
+		// Replace route with straight line from src center to dst center
+		srcCX := e.Src.TopLeft.X + e.Src.Width/2
+		srcCY := e.Src.TopLeft.Y + e.Src.Height/2
+		dstCX := e.Dst.TopLeft.X + e.Dst.Width/2
+		dstCY := e.Dst.TopLeft.Y + e.Dst.Height/2
+		e.Route = []*geo.Point{
+			geo.NewPoint(srcCX, srcCY),
+			geo.NewPoint(dstCX, dstCY),
+		}
+		e.IsCurve = false
 	}
 }
 

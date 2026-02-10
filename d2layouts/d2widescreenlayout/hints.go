@@ -86,6 +86,10 @@ type NodeHint struct {
 	// Values: "horizontal" (side-by-side), "vertical" (stacked, default).
 	// Applied before the inner engine runs by setting D2's direction attribute.
 	ChildDirection string `json:"childDirection,omitempty"`
+	// ChildOrder specifies explicit left-to-right ordering of children by ID.
+	// Used with childDirection "horizontal" to override dagre's edge-based ranking.
+	// Children not listed are appended at the end in their original order.
+	ChildOrder []string `json:"childOrder,omitempty"`
 }
 
 // WaypointHint is an absolute coordinate point for edge routing.
