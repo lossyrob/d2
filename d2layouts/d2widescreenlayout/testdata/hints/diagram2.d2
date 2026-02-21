@@ -1,0 +1,18 @@
+direction: right
+api: API Gateway
+auth: Auth Service
+db: Database {
+  tables: Tables
+  cache: Cache
+  tables -> cache: syncs
+}
+api -> auth: validates
+api -> db.tables: reads
+auth -> db.tables: queries
+auth -> db.cache: checks
+logs: Logging Service
+metrics: Metrics Collector
+api -> logs: emits
+auth -> logs: emits
+db -> metrics: reports
+logs -> metrics: feeds

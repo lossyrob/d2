@@ -1,0 +1,31 @@
+{
+  "arrangement": {
+    "rows": [["triggers", "runner"], ["services", "outputs"]]
+  },
+  "edges": {
+    "runner.orchestrator -> services": {
+      "waypoints": [
+        {"x": 200, "y": 84},
+        {"x": 200, "y": 380},
+        {"x": 423, "y": 380}
+      ]
+    },
+    "runner.stages -> services": {
+      "waypoints": [
+        {"x": 500, "y": 300},
+        {"x": 500, "y": 380},
+        {"x": 460, "y": 380}
+      ]
+    },
+    "runner -> outputs": {
+      "waypoints": [
+        {"x": 800, "y": 300},
+        {"x": 800, "y": 380},
+        {"x": 686, "y": 380}
+      ]
+    }
+  },
+  "spacing": {
+    "gap": 130
+  }
+}

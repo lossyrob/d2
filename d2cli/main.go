@@ -543,6 +543,27 @@ func compile(ctx context.Context, ms *xmain.State, plugins []d2plugin.Plugin, fs
 		return nil, false, nil
 	}
 
+	// Auto-discover widescreen hints file if layout is widescreen
+	if layout != nil && *layout == "widescreen" {
+		hintsVal, _ := ms.Opts.Flags.GetString("widescreen-hints")
+		if hintsVal == "" {
+			// Auto-discover: look for <input>.hints.json
+			autoPath := inputPath + ".hints.json"
+			if _, statErr := os.Stat(autoPath); statErr == nil {
+				if ms.Log.Debug != nil {
+					ms.Log.Debug.Printf("auto-discovered hints file: %s", autoPath)
+				}
+				_ = ms.Opts.Flags.Set("widescreen-hints", autoPath)
+			}
+		}
+		// Auto-set layout state output path if not explicitly set
+		stateVal, _ := ms.Opts.Flags.GetString("widescreen-layout-state")
+		if stateVal == "" {
+			statePath := outputPath + ".layout.json"
+			_ = ms.Opts.Flags.Set("widescreen-layout-state", statePath)
+		}
+	}
+
 	cancel := background.Repeat(func() {
 		ms.Log.Info.Printf("compiling & running layout algorithms...")
 	}, time.Second*5)
